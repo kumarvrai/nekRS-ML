@@ -1,0 +1,86 @@
+void solve_log_law(double& utau, double umag, double ymag, double kll, double bll, double vis)
+{
+    const int niter = 100;
+    const double tol = 1e-10;
+    double f, fp, res;
+
+    // Initial guess for utau
+    utau = std::sqrt(vis * umag / ymag);
+
+    f = umag / utau - (std::log(ymag * utau / vis) / kll + b11);
+    res = std::abs(f);
+
+    if (res < tol) return; // Converged
+
+    for (int i = 0; i < niter; ++i)
+    {
+        fp = -(kll * umag + utau) / (kll * utau * utau + 1e-6);
+        utau = utau - f / fp;
+
+        f = umag / utau - (std::log(ymag * utau / vis) / kll + b11);
+        res = std::abs(f);
+
+        if (res < tol) break; // Converged
+    }
+}
+void solve_log_law_rgh(double& utau, double umag, double ymag, double kll, double bll, double z0, double vis)
+{
+    const int niter = 100;
+    const double tol = 1e-10;
+    double f, fp, res, bnew, rplus;
+
+    // Initial guess for utau
+    utau = std::sqrt(vis * umag / ymag);
+    rplus = z0 * utau / vis;
+    bnew = bll - std::log(1.0 + rplus / 3.4) / kll;
+
+    f = umag / utau - (std::log(ymag * utau / vis) / kll + bnew);
+    res = std::abs(f);
+
+    if (res < tol) return; // Converged
+
+    for (int i = 0; i < niter; ++i)
+    {
+        fp = -(kll * umag + utau) / (kll * utau * utau + 1e-6);
+        utau = utau - f / fp;
+
+        rplus = z0 * utau / vis;
+        bnew = bll - std::log(1.0 + rplus / 3.4) / kll;
+
+        f = umag / utau - (std::log(ymag * utau / vis) / kll + bnew);
+        res = std::abs(f);
+
+        if (res < tol) break; // Converged
+    }
+}
+
+// Function to compute utau using Reichardt's log law
+double solve_reichardt_log_law(double umag, double ymag, double kll, double bll, double vis, int max_iter = 100, double tol = 1e-10) {
+    double utau = std::sqrt(vis * umag / ymag);  // Initial guess
+    double f, fp, ypl, res;
+
+    for (int i = 0; i < max_iter; ++i) {
+        ypl = ymag * utau / vis;
+        if(ypl < 5.0) {
+
+          utau = umag*vis/ymag;
+
+        } else {
+
+          f = umag / utau - (std::log(1.0 + kll * ypl) / kll
+               + 7.8 * (1.0 - std::exp(-ypl / 11.0) - (ypl / 11.0) * std::exp(-ypl / 3.0)));
+
+          res = std::abs(f);
+          if (res < tol) break;  // Convergence check
+
+          // Compute derivative
+          fp = (-umag - utau * (ypl / (1.0 + kll * ypl)
+               + 7.8 * (ypl * std::exp(-ypl / 11.0) / 11.0
+               - (ypl / 11.0) * std::exp(-ypl / 3.0) * (1.0 - ypl / 3.0)))) / (utau * utau);
+
+          utau -= f / fp;  // Newton-Raphson update
+        }
+    }
+
+    return utau;
+}
