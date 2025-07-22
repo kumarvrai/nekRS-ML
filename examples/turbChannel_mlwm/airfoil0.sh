@@ -28,10 +28,5 @@ export LD_LIBRARY_PATH=$INS_DIR/SmartRedis/install/lib64:$LD_LIBRARY_PATH
 
 cd $PBS_O_WORKDIR
 
-##On 1 nodes####
-#${PWD}/run_train_colocated.sh
-${PWD}/run_inference_colocated.sh
-
-##On 3 nodes####
-#./run_train_clustered.sh
-#./run_inference_clustered.sh
+${PWD}/run_train_colocated.sh
+#${PWD}/run_inference_colocated.sh
