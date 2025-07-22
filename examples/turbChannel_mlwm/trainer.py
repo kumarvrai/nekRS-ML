@@ -20,6 +20,7 @@ from torch.utils.data import Dataset, DataLoader
 from torch.utils.data.distributed import DistributedSampler
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.distributed import all_gather
 
 # SmartRedis imports
 from smartredis import Client
@@ -136,7 +137,8 @@ class RankStepDataset(torch.utils.data.Dataset):
         rank_id = rank_id+self.head_rank
         step_id = idx//self.ranks
         step = self.steps[step_id]
-        return f"x.{rank_id}.{step}"
+        #return f"x.{rank_id}.{step}"
+        return f"x.{rank_id}"
 
 class MinibDataset(torch.utils.data.Dataset):
     #dataset of each ML rank in one epoch with the concatenated tensors
@@ -177,7 +179,7 @@ def train(comm, model, train_sampler, train_tensor_loader, optimizer, epoch,
         train_loader = DataLoader(mbdata, shuffle=True, batch_size=batch)
         for batch_idx, dbdata in enumerate(train_loader):
             # with this a small model, slow down training a little for purpses of example problem
-            sleep(0.01)
+            #sleep(0.01)
 
             # split inputs and outputs
             if (args.device != 'cpu'):
@@ -192,17 +194,31 @@ def train(comm, model, train_sampler, train_tensor_loader, optimizer, epoch,
             optimizer.step()
             running_loss += loss.item()
 
-            if ((batch_idx)%10==0):
-                print(f'Train Epoch: {epoch} | ' + \
-                      f'[{tensor_idx+1}/{len(train_tensor_loader)}] | ' + \
-                      f'[{batch_idx+1}/{len(train_loader)}] | ' + \
-                      f'Loss: {loss.item():>8e}', flush=True)
+            #if ((batch_idx)%10==0):
+            #    print(f'Train Epoch: {epoch} | ' + \
+            #          f'[{tensor_idx+1}/{len(train_tensor_loader)}] | ' + \
+            #          f'[{batch_idx+1}/{len(train_loader)}] | ' + \
+            #          f'Loss: {loss.item():>8e}', flush=True)
 
     running_loss = running_loss / len(train_loader) / len(train_tensor_loader)
     loss_avg = metric_average(comm, size, running_loss)
 
+    ##local_residuals = (target - output).detach().to('cpu')
+    #local_residuals = (target - output).detach()
+    ## Create a list to hold gathered residuals
+    #world_size = dist.get_world_size()
+    #residual_list = [torch.zeros_like(local_residuals) for _ in range(world_size)]
+    #all_gather(residual_list, local_residuals)
+
+    ## Concatenate into one big tensor
+    #all_residuals = torch.cat(residual_list, dim=0).to('cpu').numpy()
+
     if rank == 0:
         print(f"Training set: Average loss: {loss_avg:>8e}", flush=True)
+        #np.savetxt(f"residuals_epoch_{epoch}.csv", all_residuals, delimiter=",")
+
+        #residuals = (target - output).detach().to('cpu').numpy()
+        #print(f"ErrorHist: {epoch} {residuals}", flush=True)
 
     return model, loss_avg
 
@@ -306,7 +322,8 @@ def main():
     # NN Training Hyper-Parameters
     Nepochs = 100 # number of epochs
     batch =  int(num_db_tensors/args.ppn) # how many tensors to grab from db
-    mini_batch = 128 # batch size once tensors obtained from db and concatenated 
+    #mini_batch = 128 # batch size once tensors obtained from db and concatenated 
+    mini_batch = int(npts/2) # batch size once tensors obtained from db and concatenated 
     learning_rate = 0.001 # learning rate
     nNeurons = 20 # number of neuronsining settings
     tol = 1.0e-7 # convergence tolerance on loss function
@@ -322,10 +339,11 @@ def main():
             torch.cuda.set_device(device_id)
 
     # Instantiate the NN model and optimizer
-    model = NeuralNetwork(inputDim=ndIn, outputDim=ndOut, numNeurons=nNeurons)
+    #model = NeuralNetwork(inputDim=ndIn, outputDim=ndOut, numNeurons=nNeurons)
+    model = FCN(input_size=ndIn, hidden_size=nNeurons, output_size=ndOut)
     if (args.device != 'cpu'):
         model.to(args.device)
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate*size)
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate*size, weight_decay=1e-3)
     
     # Wrap model with DDP
     model = DDP(model) 

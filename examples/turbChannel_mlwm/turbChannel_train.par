@@ -1,15 +1,15 @@
 [GENERAL]
 #verbose = true
 polynomialOrder = 4
-#startFrom = "restart.fld"
+startFrom = "restart.fld"+time=0
 stopAt = endTime
 endTime = 400
 
-dt = targetCFL=2 + max=2e-2 + initial=5e-3
+dt = targetCFL=1 + max=2e-2 + initial=5e-3
 timeStepper = tombo2
 
 writeControl = simulationTime 
-writeInterval = 20
+writeInterval = 10
 
 regularization = hpfrt + nModes=1 + scalingCoeff=5
 #constFlowRate = meanVelocity=1.0 + direction=X
@@ -19,12 +19,17 @@ residualTol = 1e-04
 
 [VELOCITY]
 boundaryTypeMap = wall
-viscosity = 1/10000
+viscosity = 1/19000
 density = 1.0
 residualTol = 1e-06
 
 [CASEDATA]
-ReTau = 550
+ReTau = 950
 xLength = 6.283185307 
 zLength = 3.141592653 
 betaY = 2.2
+tWallAvg = 10.0
+number_elements_x = 36
+number_elements_y = 16
+number_elements_z = 18
+tAvgWriteInterval=5000

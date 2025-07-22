@@ -11,6 +11,15 @@ static dfloat ReTau;
 static dfloat zLength;
 static dfloat xLength;
 static dfloat betaY;
+static dfloat tWallAvg;
+static dfloat endTime;
+static int tAvgWriteInterval;
+static int NUMBER_ELEMENTS_X;
+static int NUMBER_ELEMENTS_Y;
+static int NUMBER_ELEMENTS_Z;
+
+static int Nfields = 11;
+static occa::memory o_work;
 
 // recycling inlets
 using velInflowData = std::tuple<dlong, dfloat, dfloat, dfloat, dfloat>;
@@ -41,6 +50,104 @@ static int Nblock;
 #endif
 
 /* User Functions */
+void planarAverage(nrs_t *nrs)
+{
+  const auto fieldOffsetByte = nrs->fieldOffset * sizeof(dfloat);
+  postProcessing::planarAvg(nrs, "xz", NUMBER_ELEMENTS_X, NUMBER_ELEMENTS_Y, NUMBER_ELEMENTS_Z, 3, o_work); // o_work tavg-ed 9-slots data
+}
+
+void writeStatistics(nrs_t *nrs, dfloat time, int tstep, const std::string& fname)
+{
+  auto mesh = nrs->meshV;
+
+  const auto np = (platform->comm.mpiRank == 0) ? NUMBER_ELEMENTS_Y * mesh->N : 0;
+  const auto offset = np;
+
+  static pointInterpolation_t *interpolator = nullptr;
+  static std::vector<dfloat> xp, yp, zp;
+  static occa::memory o_fields1D;
+  //const auto Nfields = 4;
+
+  if (!interpolator) {
+
+    const auto yMin = platform->linAlg->min(mesh->Nlocal, mesh->o_y, platform->comm.mpiComm);
+    const auto yMax = platform->linAlg->max(mesh->Nlocal, mesh->o_y, platform->comm.mpiComm);
+
+    if (np) {
+      const auto x0 = 0.0;
+      float y0;
+      const auto z0 = 0.0;
+
+      for (int i = 0; i < np; i++) {
+        //y0 = (static_cast<dfloat>(i)/(np-1)) * (yMax-yMin) + yMin;
+        y0 = (static_cast<dfloat>(i)/(np-1));
+        y0 = tanh(betaY*(2.0*y0-1.0))/tanh(betaY);
+        xp.push_back(x0);
+        yp.push_back(y0);
+        zp.push_back(z0);
+      }
+
+      o_fields1D = platform->device.malloc(Nfields * offset * sizeof(dfloat));
+    }
+
+    interpolator = new pointInterpolation_t(nrs);
+    interpolator->setPoints(np, xp.data(), yp.data(), zp.data());
+    interpolator->find();
+
+    if (platform->comm.mpiRank == 0) { 
+      std::ofstream f(fname, std::ios::app);
+      f << R"(Points:0,Points:1,Points:2)"
+        << R"(,AVVEL:0,AVVEL:1,AVVEL:2,AVPRE)"
+        << R"(,AVVE2:0,AVVE2:1,AVVE2:2,AVVXY:0,AVVXY:1,AVVXY:2,AVPR2)"
+        << std::endl;
+      f.close();
+    }
+  }
+  
+  const auto fieldOffsetBytes = nrs->fieldOffset * sizeof(dfloat);
+
+  o_work.copyFrom(tavg::o_avg(), Nfields * fieldOffsetBytes);
+
+  postProcessing::planarAvg(nrs, 
+                            "xz", 
+                            NUMBER_ELEMENTS_X, 
+                            NUMBER_ELEMENTS_Y, 
+                            NUMBER_ELEMENTS_Z, 
+                            Nfields, 
+                            o_work);
+
+  interpolator->eval(Nfields, 
+                     nrs->fieldOffset, 
+                     o_work, 
+                     offset, 
+                     o_fields1D);
+
+  if (platform->comm.mpiRank == 0) {
+    std::vector<dfloat> fields1D(o_fields1D.size() / sizeof(dfloat));
+    o_fields1D.copyTo(fields1D.data());
+
+     const auto sep = ", ";
+     std::ofstream f(fname, std::ios::app);
+
+     f << R"(#time=)" << time << std::endl;
+     for (int i = 0; i < np; i++) {
+       f << std::scientific
+         << xp[i] << sep
+         << yp[i] << sep
+         << zp[i];
+         // << zp[i] << sep;
+
+       // <u> <v> <w> <p> <uu> <vv> <ww> <uv> <uw> <vw> <pp>
+       for(int ifld = 0; ifld < Nfields; ifld++) {
+         f << sep << fields1D[i + ifld * offset];
+         // f << fields1D[i + ifld * offset] << sep;
+       }
+       f << std::endl;
+     }
+     f.close();
+  }
+}
+
 void setupRecycledInflow(nrs_t *nrs)
 {
   mesh_t *mesh = nrs->meshV;
@@ -269,6 +376,11 @@ void UDF_Setup0(MPI_Comm comm, setupAide &options)
   platform->par->extract("casedata", "zLength", zLength);
   platform->par->extract("casedata", "xLength", xLength);
   platform->par->extract("casedata", "betaY", betaY);
+  platform->par->extract("casedata", "tWallAvg", tWallAvg);
+  platform->par->extract("casedata", "number_elements_x", NUMBER_ELEMENTS_X);
+  platform->par->extract("casedata", "number_elements_y", NUMBER_ELEMENTS_Y);
+  platform->par->extract("casedata", "number_elements_z", NUMBER_ELEMENTS_Z);
+  platform->par->extract("casedata", "tAvgWriteInterval", tAvgWriteInterval);
 
   *((double *)nek::scPtr(1)) = xLength;
   *((double *)nek::scPtr(2)) = zLength;
@@ -285,16 +397,25 @@ void UDF_Setup(nrs_t *nrs)
   useric(nrs);
 
   {
+   o_work = platform->device.malloc(Nfields * nrs->fieldOffset * sizeof(dfloat));
    std::vector<std::vector<occa::memory>> tavgFields;
+   const auto fieldOffsetBytes = nrs->fieldOffset * sizeof(dfloat);
 
-   auto o_u         = nrs->o_U + 0*nrs->fieldOffset;
-   auto o_v         = nrs->o_U + 1*nrs->fieldOffset;
-   auto o_w         = nrs->o_U + 2*nrs->fieldOffset;
+   auto o_u         = nrs->o_U.slice(0 * fieldOffsetBytes, fieldOffsetBytes);
+   auto o_v         = nrs->o_U.slice(1 * fieldOffsetBytes, fieldOffsetBytes);
+   auto o_w         = nrs->o_U.slice(2 * fieldOffsetBytes, fieldOffsetBytes);
    auto o_p         = nrs->o_P;
    tavgFields.push_back({o_u});
    tavgFields.push_back({o_v});
    tavgFields.push_back({o_w});
    tavgFields.push_back({o_p});
+   tavgFields.push_back({o_u, o_u});
+   tavgFields.push_back({o_v, o_v});
+   tavgFields.push_back({o_w, o_w});
+   tavgFields.push_back({o_u, o_v});
+   tavgFields.push_back({o_u, o_w});
+   tavgFields.push_back({o_v, o_w});
+   tavgFields.push_back({o_p, o_p});
 
    tavg::setup(nrs, tavgFields);
   }
@@ -308,7 +429,7 @@ void UDF_Setup(nrs_t *nrs)
   setupRecycledInflow(nrs);
 
   dlong npts = interpolator->numPoints();
-  printf("NPTS = %d \n",npts);
+  if (platform->comm.mpiRank==0) printf("NPTS = %d \n",npts);
   BdryToV = (dlong *) calloc(npts, sizeof(dlong));
   Upart = (dfloat *) calloc(nrs->NVfields * npts, sizeof(dfloat));
 
@@ -348,10 +469,26 @@ void UDF_ExecuteStep(nrs_t *nrs, dfloat time, int tstep)
     smartredis::put_step_num(tstep);
   }
 
+  //if (nrs->isOutputStep) {
+  //  tavg::outfld();
+  //}
+
+  if (tstep > 1 && (tstep % tAvgWriteInterval)==0) {
+     //planarAverage(nrs);
+     writeStatistics(nrs, time, tstep, "NekAvgData_1D.csv");
+  }
+
   // Every time step check if ML training says it is time to quit 
   int exit_val = smartredis::check_run();
   MPI_Allreduce(MPI_IN_PLACE, &exit_val, 1, MPI_INT, MPI_MIN, platform->comm.mpiComm);
   if (exit_val==0) {
     platform->options.setArgs("END TIME",to_string_f(-10.0));
   }
+
+  //platform->options.getArgs("END TIME", endTime);
+
+  //if (time>=(endTime)) {
+  //  if (platform->comm.mpiRank==0) printf("SHUTTING SMARTREDIS AT TIME = %f \n",time);
+  //  smartredis::del_client(nrs);
+  //}
 }
