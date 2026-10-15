@@ -170,7 +170,8 @@ void smartredis::run_wallModel(int tstep, int npts, int num_inputs, const double
   client_ptr->put_tensor(in_key, (void *)inputs, {(size_t)npts, (size_t)num_inputs}, SRTensorTypeDouble,
                          SRMemLayoutContiguous);
   client_ptr->run_model("model", {in_key}, {out_key});
-  client_ptr->unpack_tensor(out_key, outputs, {(size_t)npts, (size_t)num_outputs}, SRTensorTypeDouble,
+  // contiguous destination: SmartRedis wants its total length, not the shape
+  client_ptr->unpack_tensor(out_key, outputs, {(size_t)npts * num_outputs}, SRTensorTypeDouble,
                             SRMemLayoutContiguous);
   client_ptr->delete_tensor(in_key);
   client_ptr->delete_tensor(out_key);
