@@ -30,6 +30,8 @@
 //   wm_leapwitsave        = 10           (training: steps between samples)
 //   wm_infer_stride       = 1            (inference: steps between updates)
 //   wm_inference_backend  = smartredis | reichardt
+//   wm_infer_dtype        = float32 | float64  (tensors sent to the model; float32
+//                           as SOD2D, so SOD2D-exported models run unchanged)
 //
 // The wall-shear BC is written to nrs->o_usrwrk slots 0..2 as the traction
 // vector on the fluid in global axes; the .oudf projects it on its face
@@ -62,6 +64,7 @@ struct config_t {
   int leapWitSave = 10;
   int inferStride = 1;
   std::string inferenceBackend = "smartredis";
+  std::string inferDtype = "float32";
 };
 
 void setup(nrs_t *nrs);

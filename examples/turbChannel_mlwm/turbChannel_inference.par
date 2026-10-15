@@ -53,3 +53,4 @@ period_walave = 1.0
 wm_project_normal = false
 wm_infer_stride = 1
 wm_inference_backend = smartredis
+wm_infer_dtype = float32

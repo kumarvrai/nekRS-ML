@@ -72,6 +72,7 @@ void readConfig()
   par->extract(sec, "wm_leapwitsave", cfg.leapWitSave);
   par->extract(sec, "wm_infer_stride", cfg.inferStride);
   par->extract(sec, "wm_inference_backend", cfg.inferenceBackend);
+  par->extract(sec, "wm_infer_dtype", cfg.inferDtype);
 
   auto check = [](bool ok, const std::string &msg) {
     nrsCheck(!ok, platform->comm.mpiComm, EXIT_FAILURE, "[WALLMODEL] %s\n", msg.c_str());
@@ -82,6 +83,7 @@ void readConfig()
         "wm_sample_field must be instantaneous or walave");
   check(cfg.inferenceBackend == "smartredis" || cfg.inferenceBackend == "reichardt",
         "wm_inference_backend must be smartredis or reichardt");
+  check(cfg.inferDtype == "float32" || cfg.inferDtype == "float64", "wm_infer_dtype must be float32 or float64");
   check(cfg.numOffwallPoints >= 1, "wm_num_offwall_points must be >= 1");
   check(cfg.witnessDist > 0, "wm_witness_dist must be > 0");
   check(cfg.leapWitSave >= 1 && cfg.inferStride >= 1, "wm_leapwitsave and wm_infer_stride must be >= 1");
@@ -532,7 +534,8 @@ void executeStep(nrs_t *nrs, dfloat time, int tstep)
       }
       else {
 #ifdef ENABLE_SMARTREDIS
-        smartredis::run_wallModel(tstep, nWall, numInputs(), inputData.data(), numInferOutputs, utau.data());
+        smartredis::run_wallModel(tstep, nWall, numInputs(), inputData.data(), numInferOutputs, utau.data(),
+                                  cfg.inferDtype == "float32");
 #endif
       }
       applyWallShear(nrs, utau);

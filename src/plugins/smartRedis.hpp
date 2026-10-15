@@ -23,7 +23,8 @@ struct smartredis_data {
 //   x.<rank>.<step>    double[npts, n_inputs+n_outputs]  training sample
 //   wm_sample.<i>      double[2]  step, time of the i-th training sample
 //   wm_done            double[1]  number of samples sent (end of run)
-//   x/y.<rank>.<step>  inference input/output, deleted after use
+//   x/y.<rank>.<step>  inference input/output (float32 by default, as SOD2D),
+//                      deleted after use
 // Ranks without wall points send no x.*, wm_static.* or y.* tensors.
 namespace smartredis
 {
@@ -38,7 +39,8 @@ namespace smartredis
   void put_wallModel_static(int npts, int ncols, const double *data, const std::vector<double> &meta);
   void put_wallModel_sample(int isample, int tstep, double time, int npts, int ncols, const double *data);
   void put_wallModel_done(int nsamples);
-  void run_wallModel(int tstep, int npts, int num_inputs, const double *inputs, int num_outputs, double *outputs);
+  void run_wallModel(int tstep, int npts, int num_inputs, const double *inputs, int num_outputs, double *outputs,
+                     bool float32 = true);
 
   // Velocity-pressure model
   void init_velNpres_train(nrs_t *nrs);

@@ -158,21 +158,34 @@ void smartredis::put_wallModel_done(int nsamples)
 // own keys, so there is no MPI collective in here (a barrier inside the
 // npts > 0 branch would deadlock, as in SOD2D before its fix). Keys carry
 // the step and are deleted after use so the DB does not grow.
+// float32: the tensors are float, as SOD2D (rp = 4) sends them, so a model
+// exported from SOD2D (traced in float32) runs unchanged.
 void smartredis::run_wallModel(int tstep, int npts, int num_inputs, const double *inputs, int num_outputs,
-                               double *outputs)
+                               double *outputs, bool float32)
 {
   if (npts == 0)
     return;
   int rank = platform->comm.mpiRank;
   std::string in_key = "x." + std::to_string(rank) + "." + std::to_string(tstep);
   std::string out_key = "y." + std::to_string(rank) + "." + std::to_string(tstep);
+  const size_t nin = (size_t)npts * num_inputs;
+  const size_t nout = (size_t)npts * num_outputs;
 
-  client_ptr->put_tensor(in_key, (void *)inputs, {(size_t)npts, (size_t)num_inputs}, SRTensorTypeDouble,
-                         SRMemLayoutContiguous);
-  client_ptr->run_model("model", {in_key}, {out_key});
-  // contiguous destination: SmartRedis wants its total length, not the shape
-  client_ptr->unpack_tensor(out_key, outputs, {(size_t)npts * num_outputs}, SRTensorTypeDouble,
-                            SRMemLayoutContiguous);
+  if (float32) {
+    std::vector<float> in(inputs, inputs + nin), out(nout);
+    client_ptr->put_tensor(in_key, in.data(), {(size_t)npts, (size_t)num_inputs}, SRTensorTypeFloat,
+                           SRMemLayoutContiguous);
+    client_ptr->run_model("model", {in_key}, {out_key});
+    // contiguous destination: SmartRedis wants its total length, not the shape
+    client_ptr->unpack_tensor(out_key, out.data(), {nout}, SRTensorTypeFloat, SRMemLayoutContiguous);
+    std::copy(out.begin(), out.end(), outputs);
+  }
+  else {
+    client_ptr->put_tensor(in_key, (void *)inputs, {(size_t)npts, (size_t)num_inputs}, SRTensorTypeDouble,
+                           SRMemLayoutContiguous);
+    client_ptr->run_model("model", {in_key}, {out_key});
+    client_ptr->unpack_tensor(out_key, outputs, {nout}, SRTensorTypeDouble, SRMemLayoutContiguous);
+  }
   client_ptr->delete_tensor(in_key);
   client_ptr->delete_tensor(out_key);
 }
