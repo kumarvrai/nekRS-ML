@@ -362,6 +362,12 @@ namespace occa {
       if (!has(typedef_)) {
         return false;
       }
+      // The typedef qualifier alone does not make type a typedef_t; casting
+      // a non-typedef type read a garbage baseType and segfaulted at random
+      // in the OKL parser (seen compiling the ogs kernels).
+      if (!type || !(type->type() & typeType::typedef_)) {
+        return false;
+      }
 
       typedef_t &typedefType = *((typedef_t*) type);
       return (
