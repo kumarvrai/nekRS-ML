@@ -297,9 +297,12 @@ void UDF_Setup0(MPI_Comm comm, setupAide &options)
   platform->par->extract("casedata", "number_elements_z", NUMBER_ELEMENTS_Z);
   platform->par->extract("casedata", "tAvgWriteInterval", tAvgWriteInterval);
 
-  *((double *)nek::scPtr(1)) = xLength;
-  *((double *)nek::scPtr(2)) = zLength;
-  *((double *)nek::scPtr(3)) = betaY;
+  // nek is not initialized with --build-only
+  if (options.compareArgs("BUILD ONLY", "FALSE")) {
+    *((double *)nek::scPtr(1)) = xLength;
+    *((double *)nek::scPtr(2)) = zLength;
+    *((double *)nek::scPtr(3)) = betaY;
+  }
 }
 
 void UDF_Setup(nrs_t *nrs)

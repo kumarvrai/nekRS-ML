@@ -7,7 +7,9 @@
 #   BACKEND=CPU : nekRS CPU, ONNX model on CPU (MODEL=model.onnx); CPU
 #                 RedisAI on MN5 has no torch backend
 #   NSIM  MPI ranks for nekRS (default 2)
+#   LOAD_EXP  True reuses an existing nekRS-ML/ run dir (no file staging)
 BACKEND=${BACKEND:-CUDA}
+LOAD_EXP=${LOAD_EXP:-False}
 NSIM=${NSIM:-2}
 
 for ext in box usr par re2; do cp turbChannel_inference.$ext turbChannel.$ext; done
@@ -23,7 +25,7 @@ else
 fi
 
 python ssim_driver_marenostrum.py \
-  database.load_exp=True \
+  database.load_exp=${LOAD_EXP} \
   sim.executable=$NEKRS_HOME/bin/nekrs run_args.simprocs=$NSIM run_args.simprocs_pn=$NSIM \
   sim.arguments="${sim_arguments}" \
   sim.copy_files=["./turbChannel.oudf","./turbChannel.usr","./turbChannel.par","./turbChannel.udf","./turbChannel.re2","./turbChannel.box","./my_drag.oudf","./affinity_nrs.sh","./restart.fld"] \

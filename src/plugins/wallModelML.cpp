@@ -488,6 +488,20 @@ void executeStep(nrs_t *nrs, dfloat time, int tstep)
     if (tstep > 0 && tstep % cfg.leapWitSave == 0) {
       sampleInputs(nrs);
       sampleTarget(nrs);
+      {
+        // monitor: wall-node means of the target and of u_tau^R at point 1
+        double sums[5] = {0, 0, 0, 0, (double)nWall};
+        for (int n = 0; n < nWall; n++) {
+          for (int j = 0; j < numOutputs; j++)
+            sums[j] += outputData[static_cast<size_t>(n) * numOutputs + j];
+          sums[3] += inputData[static_cast<size_t>(n) * numInputs() + colUtauR];
+        }
+        MPI_Allreduce(MPI_IN_PLACE, sums, 5, MPI_DOUBLE, MPI_SUM, platform->comm.mpiComm);
+        if (platform->comm.mpiRank == 0)
+          printf("wallModelML: sample %d step %d time %.6e  mean tau_w (%.6e %.6e %.6e)  mean u_tau^R %.6e\n",
+                 sampleIndex, tstep, time, sums[0] / sums[4], sums[1] / sums[4], sums[2] / sums[4],
+                 sums[3] / sums[4]);
+      }
 #ifdef ENABLE_SMARTREDIS
       std::vector<dfloat> rows(static_cast<size_t>(nWall) * (numInputs() + numOutputs));
       const int nc = numInputs() + numOutputs;
@@ -522,6 +536,22 @@ void executeStep(nrs_t *nrs, dfloat time, int tstep)
 #endif
       }
       applyWallShear(nrs, utau);
+
+      // monitor: wall-node means of the model u_tau and of the applied |tau_w|
+      if ((tstep / cfg.inferStride) % 10 == 0) {
+        double sums[3] = {0, 0, (double)nWall};
+        for (int n = 0; n < nWall; n++) {
+          const dlong v = wallToV[n];
+          sums[0] += utau[n];
+          sums[1] += std::sqrt(nrs->usrwrk[v] * nrs->usrwrk[v] +
+                               nrs->usrwrk[v + nrs->fieldOffset] * nrs->usrwrk[v + nrs->fieldOffset] +
+                               nrs->usrwrk[v + 2 * nrs->fieldOffset] * nrs->usrwrk[v + 2 * nrs->fieldOffset]);
+        }
+        MPI_Allreduce(MPI_IN_PLACE, sums, 3, MPI_DOUBLE, MPI_SUM, platform->comm.mpiComm);
+        if (platform->comm.mpiRank == 0)
+          printf("wallModelML: step %d time %.6e  mean u_tau %.10e  mean |tau_w| %.10e\n", tstep, time,
+                 sums[0] / sums[2], sums[1] / sums[2]);
+      }
     }
   }
 }
