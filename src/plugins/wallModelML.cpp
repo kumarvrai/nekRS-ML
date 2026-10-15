@@ -537,20 +537,27 @@ void executeStep(nrs_t *nrs, dfloat time, int tstep)
       }
       applyWallShear(nrs, utau);
 
-      // monitor: wall-node means of the model u_tau and of the applied |tau_w|
+      // monitor: wall-node means of the model u_tau, of the applied |tau_w|
+      // and of u_tau^R (input column at point 1), and max |u_tau - u_tau^R|
       if ((tstep / cfg.inferStride) % 10 == 0) {
-        double sums[3] = {0, 0, (double)nWall};
+        double sums[4] = {0, 0, 0, (double)nWall};
+        double dmax = 0;
         for (int n = 0; n < nWall; n++) {
           const dlong v = wallToV[n];
+          const dfloat utauR = inputData[static_cast<size_t>(n) * numInputs() + colUtauR];
           sums[0] += utau[n];
           sums[1] += std::sqrt(nrs->usrwrk[v] * nrs->usrwrk[v] +
                                nrs->usrwrk[v + nrs->fieldOffset] * nrs->usrwrk[v + nrs->fieldOffset] +
                                nrs->usrwrk[v + 2 * nrs->fieldOffset] * nrs->usrwrk[v + 2 * nrs->fieldOffset]);
+          sums[2] += utauR;
+          dmax = std::max(dmax, (double)std::abs(utau[n] - utauR));
         }
-        MPI_Allreduce(MPI_IN_PLACE, sums, 3, MPI_DOUBLE, MPI_SUM, platform->comm.mpiComm);
+        MPI_Allreduce(MPI_IN_PLACE, sums, 4, MPI_DOUBLE, MPI_SUM, platform->comm.mpiComm);
+        MPI_Allreduce(MPI_IN_PLACE, &dmax, 1, MPI_DOUBLE, MPI_MAX, platform->comm.mpiComm);
         if (platform->comm.mpiRank == 0)
-          printf("wallModelML: step %d time %.6e  mean u_tau %.10e  mean |tau_w| %.10e\n", tstep, time,
-                 sums[0] / sums[2], sums[1] / sums[2]);
+          printf("wallModelML: step %d time %.6e  mean u_tau %.10e  mean |tau_w| %.10e  "
+                 "mean u_tau^R %.10e  max|u_tau-u_tau^R| %.3e\n",
+                 tstep, time, sums[0] / sums[3], sums[1] / sums[3], sums[2] / sums[3], dmax);
       }
     }
   }
