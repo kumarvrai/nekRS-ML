@@ -32,7 +32,24 @@ number_elements_x = 16
 number_elements_y = 16
 number_elements_z = 16
 tAvgWriteInterval=20000
+stretchedY = 0
 
 [TEMPERATURE]
 boundaryTypeMap = none
 solver = none
+
+[SGSMODEL]
+model = vreman
+vreman_cs = 0.1
+
+# wm_inference_backend = reichardt runs the BC path without the database
+[WALLMODEL]
+wm_mode = infer
+wm_boundary_ids = 1
+wm_witness_dist = 0.1
+wm_num_offwall_points = 1
+wm_sample_field = instantaneous
+period_walave = 1.0
+wm_project_normal = false
+wm_infer_stride = 1
+wm_inference_backend = smartredis

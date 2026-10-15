@@ -13,20 +13,18 @@ struct smartredis_data {
   int head_rank; // rank ID of the head rank on each node (metadata transfer with co-DB)
 };
 
-struct wallModel_data {
-  //const int num_inputs = 7; // number of input features of model
-  const int num_inputs = 1; // number of input features of model
-  const int num_outputs = 1; // number of outputs of model
-  const dfloat wall_height= 1.0; // y coordinate of the wall nodes
-  //const dfloat off_wall_height = -0.982609; // y coordinate of the off-wall node (ktauChannel)
-  //const dfloat off_wall_height = -0.951948; // y coordinate of the off-wall node (turbChannel)
-  const dfloat off_wall_height = 1.0; // y coordinate of the off-wall node (turbChannel)
-  const dfloat eps = 1.0e-6; // epsilon for finding and matching node coordinate
-  int num_samples; // number of samples for training (i.e., node and off-node pairs)
-  std::vector<int> ind_wall_nodes; // indices of the wall-nodes
-  std::vector<int> ind_owall_nodes_matched; // indices of the paired off-wall nodes
-};
-
+// Database keys of the wall-model data (same names as SOD2D mod_smartredis
+// where SOD2D has them):
+//   tensorInfo.<rank>  int32[6]  npts, nranks, nranks, head rank, n_inputs, n_outputs
+//   wm_meta            double    contract version, nu, K, n_inputs, n_outputs,
+//                                instantaneous(1)/walave(0), period_walave,
+//                                project_normal, nranks, witness distance
+//   wm_static.<rank>   double[npts, 12+K]  wall xyz, n, t1, t2, y_1..y_K
+//   x.<rank>.<step>    double[npts, n_inputs+n_outputs]  training sample
+//   wm_sample.<i>      double[2]  step, time of the i-th training sample
+//   wm_done            double[1]  number of samples sent (end of run)
+//   x/y.<rank>.<step>  inference input/output, deleted after use
+// Ranks without wall points send no x.*, wm_static.* or y.* tensors.
 namespace smartredis
 {
   void init_client(nrs_t *nrs);
@@ -34,42 +32,15 @@ namespace smartredis
   int check_run();
   void init_check_run();
   void put_step_num(int tstep);
-  //void init_wallModel_train(nrs_t *nrs);
-  void init_wallModel_train(nrs_t *nrs, int Npart);
-  //void put_wallModel_data(nrs_t *nrs, int tstep);
-  //void put_wallModel_data(nrs_t *nrs, int tstep, int Npart, int *BdryToV, double *Upart);
-  void put_wallModel_data_channel(nrs_t *nrs, 
-                                  int tstep, 
-                                  int Npart, 
-                                  int *BdryToV, 
-                                  double *Upart,
-                                  double *Ppart,
-                                  double *Rpart,
-                                  double *Norml,
-                                  double *Tang1,
-                                  double *Tang2);
-  void put_wallModel_data(nrs_t *nrs, 
-                          int tstep, 
-                          int Npart, 
-                          int *BdryToV, 
-                          double *Upart,
-                          double *Ppart,
-                          double *Rpart,
-                          double *Norml,
-                          double *Tang1,
-                          double *Tang2);
-  //void run_wallModel(nrs_t *nrs, int tstep);
-  //void run_wallModel(nrs_t *nrs, int tstep, int Npart, int *BdryToV, double *Upart);
-  void run_wallModel(nrs_t *nrs, 
-                     int tstep, 
-                     int Npart, 
-                     int *BdryToV, 
-                     double *Upart,
-                     double *Ppart,
-                     double *Rpart,
-                     double *Norml,
-                     double *Tang1,
-                     double *Tang2);
+
+  // Wall-shear stress model (data assembled by the wallModelML plugin)
+  void init_wallModel(int npts, int num_inputs, int num_outputs);
+  void put_wallModel_static(int npts, int ncols, const double *data, const std::vector<double> &meta);
+  void put_wallModel_sample(int isample, int tstep, double time, int npts, int ncols, const double *data);
+  void put_wallModel_done(int nsamples);
+  void run_wallModel(int tstep, int npts, int num_inputs, const double *inputs, int num_outputs, double *outputs);
+
+  // Velocity-pressure model
   void init_velNpres_train(nrs_t *nrs);
   void put_velNpres_data(nrs_t *nrs, int tstep);
   void run_pressure_model(nrs_t *nrs, int tstep);

@@ -343,7 +343,8 @@ void udfBuild(const std::string& _udfFile, setupAide &options)
             {"nekrs_RANSktau_hpp_"    , "RANSktau::buildKernel"},
             {"nekrs_lowMach_hpp_"     , "lowMach::buildKernel"},
             {"nekrs_velRecycling_hpp_", "velRecycling::buildKernel"},
-            {"nekrs_lpm_hpp_"         , "lpm_t::registerKernels"}
+            {"nekrs_lpm_hpp_"         , "lpm_t::registerKernels"},
+            {"nekrs_sgsmodel_hpp_"    , "sgsModel::buildKernel"}
           };
 
           f << "void UDF_AutoLoadPlugins(occa::properties& kernelInfo)" << std::endl

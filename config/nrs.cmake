@@ -61,6 +61,8 @@ set(SRC
     src/plugins/lowMach.cpp
     src/plugins/lpm.cpp
     src/plugins/smartRedis.cpp
+    src/plugins/wallModelML.cpp
+    src/plugins/sgsModel.cpp
     src/findpts/findpts.cpp
     src/pointInterpolation/pointInterpolation.cpp
     src/neknek/neknek.cpp

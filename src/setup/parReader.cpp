@@ -344,6 +344,10 @@ void validateKeys(const inipp::Ini::Sections &sections)
     if (sec.first.find("casedata") != std::string::npos)
       continue;
 
+    // plugin sections, keys are read and checked by the plugins
+    if (sec.first == "wallmodel" || sec.first == "sgsmodel")
+      continue;
+
     // convention: sections starting with _ are ignored
     if (sec.first.front() == '_')
       continue;

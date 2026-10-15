@@ -1,0 +1,15 @@
+// Momentum properties with an eddy viscosity: mu_eff = mu + rho * nu_t, rho
+@kernel void sgsProperties(const dlong N,
+                           const dlong offset,
+                           const dfloat mu,
+                           const dfloat rho,
+                           @ restrict const dfloat *nut,
+                           @ restrict dfloat *UPROP)
+{
+  for (dlong n = 0; n < N; ++n; @tile(p_blockSize, @outer, @inner)) {
+    if (n < N) {
+      UPROP[n + 0 * offset] = mu + rho * nut[n];
+      UPROP[n + 1 * offset] = rho;
+    }
+  }
+}

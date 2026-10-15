@@ -1,0 +1,417 @@
+//
+// nekRS User Defined File: turbulent channel, LES with an ML wall model
+//
+// One udf for training-data generation and inference; the .par selects:
+//   [SGSMODEL]  model = vreman              (src/plugins/sgsModel.hpp)
+//   [WALLMODEL] wm_mode = train | infer ... (src/plugins/wallModelML.hpp)
+// Training: no-slip walls (resolved LES), witness samples streamed to the
+//           SmartSim DB (wm_witness_sink.py writes wm_witness.h5).
+// Inference: shl walls, traction from the model through usrwrk slots 0..2.
+//
+#include <math.h>
+#include "udf.hpp"
+#include "nrs.hpp"
+#include "plugins/tavg.hpp"
+#include "plugins/sgsModel.hpp"
+#include "plugins/wallModelML.hpp"
+
+static dfloat ReTau;
+static dfloat zLength;
+static dfloat xLength;
+static dfloat betaY;
+static int stretchedY = 1;
+static int tAvgWriteInterval;
+static int NUMBER_ELEMENTS_X;
+static int NUMBER_ELEMENTS_Y;
+static int NUMBER_ELEMENTS_Z;
+
+static int Nfields = 12;
+static occa::memory o_work;
+
+static dfloat visc;
+
+dfloat *dragvx, *dragvy, *dragvz;
+occa::memory o_dragvx, o_dragvy, o_dragvz;
+
+dfloat *dragpx, *dragpy, *dragpz;
+occa::memory o_dragpx, o_dragpy, o_dragpz;
+
+struct Force {
+  dfloat x;
+  dfloat y;
+  dfloat z;
+};
+
+#ifdef __okl__
+  #include "turbChannel.oudf"
+  #include "my_drag.oudf"
+#endif
+
+/* User Functions */
+/* Viscous Drag and Pressure Drag */
+Force compute_dragv(nrs_t *nrs, int nbID, const occa::memory& o_bID, occa::memory &o_Sij, const dfloat scale)
+{
+  mesh_t *mesh = nrs->meshV;
+  Force dragv;
+
+  if(o_dragvx.size() == 0) {
+    dragvx = (dfloat *) calloc(mesh->Nelements, sizeof(dfloat));
+    dragvy = (dfloat *) calloc(mesh->Nelements, sizeof(dfloat));
+    dragvz = (dfloat *) calloc(mesh->Nelements, sizeof(dfloat));
+    o_dragvx = platform->device.malloc(mesh->Nelements,sizeof(dfloat));
+    o_dragvy = platform->device.malloc(mesh->Nelements,sizeof(dfloat));
+    o_dragvz = platform->device.malloc(mesh->Nelements,sizeof(dfloat));
+  }
+
+  dragvKernel(mesh->Nelements,
+       nrs->fieldOffset,
+       nbID,
+       o_bID,
+       mesh->o_sgeo,
+       mesh->o_vmapM,
+       mesh->o_EToB,
+       nrs->o_mue,
+       o_Sij,
+       o_dragvx,
+       o_dragvy,
+       o_dragvz);
+
+  o_dragvx.copyTo(dragvx);
+  o_dragvy.copyTo(dragvy);
+  o_dragvz.copyTo(dragvz);
+
+  dragv.x=0.0;
+  dragv.y=0.0;
+  dragv.z=0.0;
+  for (dlong i = 0; i < mesh->Nelements; i++) {
+    dragv.x += dragvx[i];
+    dragv.y += dragvy[i];
+    dragv.z += dragvz[i];
+  }
+  MPI_Allreduce(MPI_IN_PLACE, &dragv.x, 1, MPI_DFLOAT, MPI_SUM, platform->comm.mpiComm);
+  MPI_Allreduce(MPI_IN_PLACE, &dragv.y, 1, MPI_DFLOAT, MPI_SUM, platform->comm.mpiComm);
+  MPI_Allreduce(MPI_IN_PLACE, &dragv.z, 1, MPI_DFLOAT, MPI_SUM, platform->comm.mpiComm);
+  dragv.x *= scale;
+  dragv.y *= scale;
+  dragv.z *= scale;
+
+  return dragv;
+}
+
+Force compute_dragp(nrs_t *nrs, int nbID, const occa::memory& o_bID, occa::memory &o_P, const dfloat scale)
+{
+  mesh_t *mesh = nrs->meshV;
+  Force dragp;
+
+  if(o_dragpx.size() == 0) {
+    dragpx = (dfloat *) calloc(mesh->Nelements, sizeof(dfloat));
+    dragpy = (dfloat *) calloc(mesh->Nelements, sizeof(dfloat));
+    dragpz = (dfloat *) calloc(mesh->Nelements, sizeof(dfloat));
+    o_dragpx = platform->device.malloc(mesh->Nelements,sizeof(dfloat));
+    o_dragpy = platform->device.malloc(mesh->Nelements,sizeof(dfloat));
+    o_dragpz = platform->device.malloc(mesh->Nelements,sizeof(dfloat));
+  }
+
+  dragpKernel(mesh->Nelements,
+       nrs->fieldOffset,
+       nbID,
+       o_bID,
+       mesh->o_sgeo,
+       mesh->o_vmapM,
+       mesh->o_EToB,
+       o_P,
+       o_dragpx,
+       o_dragpy,
+       o_dragpz);
+
+  o_dragpx.copyTo(dragpx);
+  o_dragpy.copyTo(dragpy);
+  o_dragpz.copyTo(dragpz);
+
+  dragp.x=0.0;
+  dragp.y=0.0;
+  dragp.z=0.0;
+  for (dlong i = 0; i < mesh->Nelements; i++) {
+    dragp.x += dragpx[i];
+    dragp.y += dragpy[i];
+    dragp.z += dragpz[i];
+  }
+  MPI_Allreduce(MPI_IN_PLACE, &dragp.x, 1, MPI_DFLOAT, MPI_SUM, platform->comm.mpiComm);
+  MPI_Allreduce(MPI_IN_PLACE, &dragp.y, 1, MPI_DFLOAT, MPI_SUM, platform->comm.mpiComm);
+  MPI_Allreduce(MPI_IN_PLACE, &dragp.z, 1, MPI_DFLOAT, MPI_SUM, platform->comm.mpiComm);
+  dragp.x *= scale;
+  dragp.y *= scale;
+  dragp.z *= scale;
+
+  return dragp;
+}
+
+void writeStatistics(nrs_t *nrs, dfloat time, int tstep, const std::string& fname)
+{
+  auto mesh = nrs->meshV;
+
+  const auto np = (platform->comm.mpiRank == 0) ? NUMBER_ELEMENTS_Y * mesh->N : 0;
+  const auto offset = np;
+
+  static pointInterpolation_t *interpolatorf = nullptr;
+  static std::vector<dfloat> xp, yp, zp;
+  static occa::memory o_fields1D;
+
+  if (!interpolatorf) {
+
+    const auto yMin = platform->linAlg->min(mesh->Nlocal, mesh->o_y, platform->comm.mpiComm);
+    const auto yMax = platform->linAlg->max(mesh->Nlocal, mesh->o_y, platform->comm.mpiComm);
+
+    if (np) {
+      const auto x0 = 0.0;
+      const auto z0 = 0.0;
+
+      for (int i = 0; i < np; i++) {
+        dfloat y0 = (static_cast<dfloat>(i)/(np-1));
+        if (stretchedY)
+          y0 = tanh(betaY*(2.0*y0-1.0))/tanh(betaY);
+        else
+          y0 = y0 * (yMax-yMin) + yMin;
+        xp.push_back(x0);
+        yp.push_back(y0);
+        zp.push_back(z0);
+      }
+
+      o_fields1D = platform->device.malloc(Nfields * offset * sizeof(dfloat));
+    }
+
+    interpolatorf = new pointInterpolation_t(nrs);
+    interpolatorf->setPoints(np, xp.data(), yp.data(), zp.data());
+    interpolatorf->find();
+
+    if (platform->comm.mpiRank == 0) {
+      std::ofstream f(fname, std::ios::app);
+      f << R"(Points:0,Points:1,Points:2)"
+        << R"(,AVVEL:0,AVVEL:1,AVVEL:2,AVPRE)"
+        << R"(,AVVE2:0,AVVE2:1,AVVE2:2,AVVXY:0,AVVXY:1,AVVXY:2,AVPR2)"
+        << R"(,AVMUE)"
+        << std::endl;
+      f.close();
+    }
+  }
+
+  const auto fieldOffsetBytes = nrs->fieldOffset * sizeof(dfloat);
+
+  o_work.copyFrom(tavg::o_avg(), Nfields * fieldOffsetBytes);
+
+  postProcessing::planarAvg(nrs,
+                            "xz",
+                            NUMBER_ELEMENTS_X,
+                            NUMBER_ELEMENTS_Y,
+                            NUMBER_ELEMENTS_Z,
+                            Nfields,
+                            o_work);
+
+  interpolatorf->eval(Nfields,
+                     nrs->fieldOffset,
+                     o_work,
+                     offset,
+                     o_fields1D);
+
+  if (platform->comm.mpiRank == 0) {
+    std::vector<dfloat> fields1D(o_fields1D.size() / sizeof(dfloat));
+    o_fields1D.copyTo(fields1D.data());
+
+     const auto sep = ", ";
+     std::ofstream f(fname, std::ios::app);
+
+     f << R"(#time=)" << time << std::endl;
+     for (int i = 0; i < np; i++) {
+       f << std::scientific
+         << xp[i] << sep
+         << yp[i] << sep
+         << zp[i];
+
+       // <u> <v> <w> <p> <uu> <vv> <ww> <uv> <uw> <vw> <pp> <nu_t>
+       for(int ifld = 0; ifld < Nfields; ifld++) {
+         f << sep << fields1D[i + ifld * offset];
+       }
+       f << std::endl;
+     }
+     f.close();
+  }
+}
+
+void userf(nrs_t *nrs, dfloat time, occa::memory o_U, occa::memory o_FU)
+{
+  mesh_t *mesh = nrs->meshV;
+  dfloat mue, rho;
+  platform->options.getArgs("VISCOSITY", mue);
+  platform->options.getArgs("DENSITY", rho);
+  const dfloat RE_B = rho / mue;
+  const dfloat DPDX = (ReTau / RE_B) * (ReTau / RE_B);
+
+  occa::memory o_FUx = o_FU + 0 * nrs->fieldOffset * sizeof(dfloat);
+  platform->linAlg->fill(mesh->Nlocal, DPDX, o_FUx);
+}
+
+void useric(nrs_t *nrs)
+{
+  auto mesh = nrs->meshV;
+
+  const auto C = 5.17;
+  const auto k = 0.41;
+  const auto eps = 1e-2;
+  const auto kx = 23.0;
+  const auto kz = 13.0;
+  const auto alpha = kx * 2 * M_PI / xLength;
+  const auto beta = kz * 2 * M_PI / zLength;
+  dfloat mue;
+  platform->options.getArgs("VISCOSITY", mue);
+
+  if (platform->options.getArgs("RESTART FILE NAME").empty()) {
+    for (int i = 1; i < mesh->Nlocal; i++) {
+      const auto x = mesh->x[i];
+      const auto y = mesh->y[i];
+      const auto z = mesh->z[i];
+      const auto yp = (y < 0) ? (1 + y) * ReTau : (1 - y) * ReTau;
+
+      dfloat ux =
+          1 / k * log(1 + k * yp) + (C - (1 / k) * log(k)) * (1 - exp(-yp / 11) - yp / 11 * exp(-yp / 3));
+      ux *= ReTau * mue;
+
+      nrs->U[i + 0 * nrs->fieldOffset] = ux + eps * beta * sin(alpha * x) * cos(beta * z);
+      nrs->U[i + 1 * nrs->fieldOffset] = eps * sin(alpha * x) * sin(beta * z);
+      nrs->U[i + 2 * nrs->fieldOffset] = -eps * alpha * cos(alpha * x) * sin(beta * z);
+    }
+  }
+}
+
+/* UDF Functions */
+
+void UDF_Setup0(MPI_Comm comm, setupAide &options)
+{
+  options.getArgs("VISCOSITY", visc);
+  platform->par->extract("casedata", "ReTau", ReTau);
+  platform->par->extract("casedata", "zLength", zLength);
+  platform->par->extract("casedata", "xLength", xLength);
+  platform->par->extract("casedata", "betaY", betaY);
+  platform->par->extract("casedata", "stretchedY", stretchedY);
+  platform->par->extract("casedata", "number_elements_x", NUMBER_ELEMENTS_X);
+  platform->par->extract("casedata", "number_elements_y", NUMBER_ELEMENTS_Y);
+  platform->par->extract("casedata", "number_elements_z", NUMBER_ELEMENTS_Z);
+  platform->par->extract("casedata", "tAvgWriteInterval", tAvgWriteInterval);
+
+  *((double *)nek::scPtr(1)) = xLength;
+  *((double *)nek::scPtr(2)) = zLength;
+  *((double *)nek::scPtr(3)) = betaY;
+}
+
+void UDF_Setup(nrs_t *nrs)
+{
+  if (platform->options.compareArgs("CONSTANT FLOW RATE", "FALSE")) {
+    // assign function pointer to drive flow by constant mean pressure gradient
+    udf.uEqnSource = &userf;
+  }
+
+  // installs udf.properties: mu_eff = mu + rho nu_t
+  sgsModel::setup(nrs);
+
+  useric(nrs);
+
+  {
+   o_work = platform->device.malloc(Nfields * nrs->fieldOffset * sizeof(dfloat));
+   std::vector<std::vector<occa::memory>> tavgFields;
+   const auto fieldOffsetBytes = nrs->fieldOffset * sizeof(dfloat);
+
+   auto o_u         = nrs->o_U.slice(0 * fieldOffsetBytes, fieldOffsetBytes);
+   auto o_v         = nrs->o_U.slice(1 * fieldOffsetBytes, fieldOffsetBytes);
+   auto o_w         = nrs->o_U.slice(2 * fieldOffsetBytes, fieldOffsetBytes);
+   auto o_p         = nrs->o_P;
+   auto o_nut       = sgsModel::o_nut();
+   tavgFields.push_back({o_u});
+   tavgFields.push_back({o_v});
+   tavgFields.push_back({o_w});
+   tavgFields.push_back({o_p});
+   tavgFields.push_back({o_u, o_u});
+   tavgFields.push_back({o_v, o_v});
+   tavgFields.push_back({o_w, o_w});
+   tavgFields.push_back({o_u, o_v});
+   tavgFields.push_back({o_u, o_w});
+   tavgFields.push_back({o_v, o_w});
+   tavgFields.push_back({o_p, o_p});
+   tavgFields.push_back({o_nut});
+
+   tavg::setup(nrs, tavgFields);
+  }
+
+  wallModelML::setup(nrs);
+}
+
+void UDF_ExecuteStep(nrs_t *nrs, dfloat time, int tstep)
+{
+  mesh_t *mesh = nrs->meshV;
+  const dlong fieldOffsetBytes = nrs->fieldOffset*sizeof(dfloat);
+
+  occa::memory o_Vx = nrs->o_U.slice(0 * fieldOffsetBytes, fieldOffsetBytes);
+  occa::memory o_Vy = nrs->o_U.slice(1 * fieldOffsetBytes, fieldOffsetBytes);
+  occa::memory o_Vz = nrs->o_U.slice(2 * fieldOffsetBytes, fieldOffsetBytes);
+  occa::memory o_Pr = nrs->o_P;
+  occa::memory o_Mu = sgsModel::o_nut();
+
+  // nu_t in the temperature slot of the field files
+  if (nrs->cds)
+    nrs->cds->o_S.copyFrom(o_Mu, mesh->Nlocal * sizeof(dfloat));
+
+  // chk min/max
+  const dfloat vxmin = platform->linAlg->min(mesh->Nlocal, o_Vx, platform->comm.mpiComm);
+  const dfloat vxmax = platform->linAlg->max(mesh->Nlocal, o_Vx, platform->comm.mpiComm);
+  const dfloat vymin = platform->linAlg->min(mesh->Nlocal, o_Vy, platform->comm.mpiComm);
+  const dfloat vymax = platform->linAlg->max(mesh->Nlocal, o_Vy, platform->comm.mpiComm);
+  const dfloat vzmin = platform->linAlg->min(mesh->Nlocal, o_Vz, platform->comm.mpiComm);
+  const dfloat vzmax = platform->linAlg->max(mesh->Nlocal, o_Vz, platform->comm.mpiComm);
+  const dfloat prmin = platform->linAlg->min(mesh->Nlocal, o_Pr, platform->comm.mpiComm);
+  const dfloat prmax = platform->linAlg->max(mesh->Nlocal, o_Pr, platform->comm.mpiComm);
+  const dfloat mumin = platform->linAlg->min(mesh->Nlocal, o_Mu, platform->comm.mpiComm);
+  const dfloat mumax = platform->linAlg->max(mesh->Nlocal, o_Mu, platform->comm.mpiComm);
+  if (platform->comm.mpiRank == 0) {
+    printf(" t-min-max:  %.6e", time);
+    printf("  %.6e %.6e", vxmin, vxmax);
+    printf("  %.6e %.6e", vymin, vymax);
+    printf("  %.6e %.6e", vzmin, vzmax);
+    printf("  %.6e %.6e", prmin, prmax);
+    printf("  %.6e %.6e", mumin, mumax);
+    printf(" \n");
+  }
+
+  tavg::run(time);
+
+  if (tstep>1 && (tstep % tAvgWriteInterval)==0) {
+     writeStatistics(nrs, time, tstep, "NekAvgData_1D.csv");
+     if (platform->comm.mpiRank == 0) printf("Resetting time averaging: %d %g \n",tstep,time);
+     tavg::reset();
+  }
+
+  // Wall shear from the resolved velocity gradient (mu_eff incl. nu_t).
+  // With shl walls this is a diagnostic only; the model's u_tau is printed
+  // by wallModelML.
+  static occa::memory o_bidWall;
+  if (o_bidWall.size() == 0) {
+    std::vector<int> bidWall = {1};
+    o_bidWall = platform->device.malloc(bidWall.size() * sizeof(int), bidWall.data());
+  }
+  const auto areaWall = 2.0*xLength*zLength;
+  const dfloat scale = 1.0;
+
+  occa::memory &o_Sij = platform->o_mempool.slice0;
+  postProcessing::strainRate(nrs, true, o_Sij);
+
+  Force dragv = compute_dragv(nrs, 1, o_bidWall, o_Sij, scale);
+  Force dragp = compute_dragp(nrs, 1, o_bidWall, nrs->o_P, scale);
+
+  const auto utau = sqrt(abs((dragp.x + dragv.x) / areaWall));
+  const auto retau = utau * 1.0/ visc;
+
+  const dfloat ubar = platform->linAlg->innerProd(mesh->Nlocal, o_Vx, mesh->o_LMM, platform->comm.mpiComm)/mesh->volume;
+  const dfloat ebar = platform->linAlg->weightedNorm2Many(mesh->Nlocal, 3, nrs->fieldOffset, mesh->o_LMM,  nrs->o_U,  platform->comm.mpiComm)/mesh->volume; // (int ux^2+uy^2+uz^2)/volume
+
+  if (platform->comm.mpiRank == 0) printf(" monitor: %d %g %g %g %g %g\n",tstep,time,ubar,ebar,utau,retau);
+
+  // Wall model last: training samples / inference see the end-of-step field
+  wallModelML::executeStep(nrs, time, tstep);
+}

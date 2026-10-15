@@ -1,54 +1,31 @@
 #!/bin/bash
+# Training-data run: resolved LES (no-slip walls) streams witness samples to
+# the co-located DB; wm_witness_sink.py writes them to wm_witness.h5 in the
+# SOD2D layout. Settings in turbChannel_train.par ([WALLMODEL], [SGSMODEL]).
+#   BACKEND=CUDA (MN5 ACC, default) or BACKEND=CPU (OCCA serial, needs a CPU build)
+#   NSIM      MPI ranks for nekRS (default 4)
+#   SINK_ARGS extra sink options, e.g. "--max-samples 2000 --skip-samples 100"
+BACKEND=${BACKEND:-CUDA}
+NSIM=${NSIM:-4}
+SINK_ARGS=${SINK_ARGS:-}
 
-## Set run env
-#nodes=`wc -l < $PBS_NODEFILE`
-#striping_unit=16777216
-#max_striping_factor=128
-#let striping_factor=$nodes/2
-#if [ $striping_factor -gt $max_striping_factor ]; then
-#  striping_factor=$max_striping_factor
-#fi
-#if [ $striping_factor -lt 1 ]; then
-#  striping_factor=1
-#fi
-#MPICH_MPIIO_HINTS="*:striping_unit=${striping_unit}:striping_factor=${striping_factor}:romio_cb_write=enable:romio_ds_write=disable:romio_no_indep_rw=true"
-#
-#ulimit -s unlimited
-#export NEKRS_GPU_MPI=1
-#export MPICH_MPIIO_HINTS=$MPICH_MPIIO_HINTS
-#export MPICH_MPIIO_STATS=1
-#export NEKRS_CACHE_BCAST=1
-#export NEKRS_LOCAL_TMP_DIR=/local/scratch
-#export MPICH_GPU_SUPPORT_ENABLED=1
-##export MPICH_OFI_NIC_POLICY=NUMA
-#export FI_OFI_RXM_RX_SIZE=32768
+for ext in box usr par re2; do cp turbChannel_train.$ext turbChannel.$ext; done
 
-# Set the correct .udf file
-cp turbChannel_train.box turbChannel.box
-cp turbChannel_train.udf turbChannel.udf
-cp turbChannel_train.usr turbChannel.usr
-cp turbChannel_train.par turbChannel.par
-cp turbChannel_train.re2 turbChannel.re2
-cp turbChannel_train.oudf turbChannel.oudf
+if [ "$BACKEND" = "CUDA" ]; then
+  sim_arguments="--setup turbChannel.par --backend CUDA --device-id 0"
+  sim_affinity="sim.affinity=./affinity_nrs.sh"
+else
+  sim_arguments="--setup turbChannel.par --backend CPU"
+  sim_affinity=""
+fi
 
-# Run the driver script
-sim_arguments="--setup turbChannel.par --backend CUDA --device-id 0"
-#python ssim_driver_polaris.py \
 python ssim_driver_marenostrum.py \
   database.load_exp=True \
-  sim.executable=$NEKRS_HOME/bin/nekrs run_args.simprocs=4 run_args.simprocs_pn=4 \
-  sim.arguments="${sim_arguments}" sim.affinity=./affinity_nrs.sh \
-  sim.link_files=["turbChannel.oudf","./turbChannel.usr","./turbChannel.par","./turbChannel.udf","./turbChannel.re2","./turbChannel.box","ci.oudf","affinity_nrs.sh","restart.fld","my_drag.oudf"] \
-  train.executable=${PWD}/trainer_saveTrainData.py run_args.mlprocs=4 run_args.mlprocs_pn=4 \
+  sim.executable=$NEKRS_HOME/bin/nekrs run_args.simprocs=$NSIM run_args.simprocs_pn=$NSIM \
+  sim.arguments="${sim_arguments}" $sim_affinity \
+  sim.link_files=["./turbChannel.oudf","./turbChannel.usr","./turbChannel.par","./turbChannel.udf","./turbChannel.re2","./turbChannel.box","./my_drag.oudf","./affinity_nrs.sh","./restart.fld"] \
+  train.executable="${PWD}/wm_witness_sink.py --h5file ${PWD}/wm_witness.h5 ${SINK_ARGS}" \
+  run_args.mlprocs=1 run_args.mlprocs_pn=1 \
   train.device=cpu train.affinity=./affinity_ml.sh
-  
-  #train.executable=${PWD}/trainer_wall_model.py run_args.mlprocs=2 run_args.mlprocs_pn=2 \
-  #train.device=cuda train.affinity=./affinity_ml.sh
 
-
-rm turbChannel.box
-rm turbChannel.udf
-rm turbChannel.usr
-rm turbChannel.par
-rm turbChannel.oudf
-rm turbChannel.re2
+for ext in box usr par re2; do rm turbChannel.$ext; done

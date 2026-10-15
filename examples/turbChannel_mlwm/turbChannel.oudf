@@ -1,0 +1,14 @@
+// Boundary conditions
+// =============================================================================
+// Wall model (shl walls): wallModelML writes the traction on the fluid,
+// -tau_w, as a vector in global axes to usrwrk slots 0..2; project it on
+// this face's tangents. Not used with no-slip walls (training).
+void velocityNeumannConditions(bcData *bc)
+{
+  const dfloat trx = bc->usrwrk[bc->idM + 0 * bc->fieldOffset];
+  const dfloat try_ = bc->usrwrk[bc->idM + 1 * bc->fieldOffset];
+  const dfloat trz = bc->usrwrk[bc->idM + 2 * bc->fieldOffset];
+
+  bc->tr1 = trx * bc->t1x + try_ * bc->t1y + trz * bc->t1z;
+  bc->tr2 = trx * bc->t2x + try_ * bc->t2y + trz * bc->t2z;
+}

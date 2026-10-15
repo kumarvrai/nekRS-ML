@@ -33,3 +33,6 @@ examples/turbChannel_smartredis/outputs/
 */outputs/
 *.colocated_launcher.sh
 *-db.log
+
+__pycache__/
+*.pyc

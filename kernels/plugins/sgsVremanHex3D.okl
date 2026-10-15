@@ -1,0 +1,97 @@
+// Vreman (2004) eddy viscosity on hexahedral spectral elements.
+//   alpha_ij = du_j/dx_i,  beta_ij = dd * sum_m (du_i/dr_m)(du_j/dr_m)
+//   nu_t = c * sqrt(B_beta / (alpha_ij alpha_ij)),
+//   B_beta = b11 b22 - b12^2 + b11 b33 - b13^2 + b22 b33 - b23^2
+// dd = (2/N)^2 turns reference derivatives into a per-direction filter
+// width Delta_m = (2/N) dx/dr_m. nu_t = 0 where B_beta <= 0 or alpha = 0.
+@kernel void sgsVremanHex3D(const dlong Nelements,
+                            const dlong offset,
+                            const dfloat c,
+                            const dfloat dd,
+                            @ restrict const dfloat *vgeo,
+                            @ restrict const dfloat *D,
+                            @ restrict const dfloat *U,
+                            @ restrict dfloat *nut)
+{
+  for (dlong e = 0; e < Nelements; ++e; @outer(0)) {
+    @shared dfloat s_D[p_Nq][p_Nq];
+    @shared dfloat s_U[p_Nq][p_Nq][p_Nq];
+    @shared dfloat s_V[p_Nq][p_Nq][p_Nq];
+    @shared dfloat s_W[p_Nq][p_Nq][p_Nq];
+
+    for (int k = 0; k < p_Nq; ++k; @inner(2)) {
+      for (int j = 0; j < p_Nq; ++j; @inner(1)) {
+        for (int i = 0; i < p_Nq; ++i; @inner(0)) {
+          const dlong id = e * p_Np + k * p_Nq * p_Nq + j * p_Nq + i;
+          s_U[k][j][i] = U[id + 0 * offset];
+          s_V[k][j][i] = U[id + 1 * offset];
+          s_W[k][j][i] = U[id + 2 * offset];
+          if (k == 0)
+            s_D[j][i] = D[j * p_Nq + i];
+        }
+      }
+    }
+
+    @barrier();
+
+    for (int k = 0; k < p_Nq; ++k; @inner(2)) {
+      for (int j = 0; j < p_Nq; ++j; @inner(1)) {
+        for (int i = 0; i < p_Nq; ++i; @inner(0)) {
+          dfloat dUdr = 0, dUds = 0, dUdt = 0;
+          dfloat dVdr = 0, dVds = 0, dVdt = 0;
+          dfloat dWdr = 0, dWds = 0, dWdt = 0;
+#pragma unroll p_Nq
+          for (int n = 0; n < p_Nq; ++n) {
+            const dfloat Dr = s_D[i][n];
+            const dfloat Ds = s_D[j][n];
+            const dfloat Dt = s_D[k][n];
+            dUdr += Dr * s_U[k][j][n];
+            dUds += Ds * s_U[k][n][i];
+            dUdt += Dt * s_U[n][j][i];
+            dVdr += Dr * s_V[k][j][n];
+            dVds += Ds * s_V[k][n][i];
+            dVdt += Dt * s_V[n][j][i];
+            dWdr += Dr * s_W[k][j][n];
+            dWds += Ds * s_W[k][n][i];
+            dWdt += Dt * s_W[n][j][i];
+          }
+
+          const dlong gid = e * p_Np * p_Nvgeo + k * p_Nq * p_Nq + j * p_Nq + i;
+          const dfloat drdx = vgeo[gid + p_RXID * p_Np];
+          const dfloat drdy = vgeo[gid + p_RYID * p_Np];
+          const dfloat drdz = vgeo[gid + p_RZID * p_Np];
+          const dfloat dsdx = vgeo[gid + p_SXID * p_Np];
+          const dfloat dsdy = vgeo[gid + p_SYID * p_Np];
+          const dfloat dsdz = vgeo[gid + p_SZID * p_Np];
+          const dfloat dtdx = vgeo[gid + p_TXID * p_Np];
+          const dfloat dtdy = vgeo[gid + p_TYID * p_Np];
+          const dfloat dtdz = vgeo[gid + p_TZID * p_Np];
+
+          // physical gradient (only its Frobenius norm is needed)
+          const dfloat dudx = drdx * dUdr + dsdx * dUds + dtdx * dUdt;
+          const dfloat dudy = drdy * dUdr + dsdy * dUds + dtdy * dUdt;
+          const dfloat dudz = drdz * dUdr + dsdz * dUds + dtdz * dUdt;
+          const dfloat dvdx = drdx * dVdr + dsdx * dVds + dtdx * dVdt;
+          const dfloat dvdy = drdy * dVdr + dsdy * dVds + dtdy * dVdt;
+          const dfloat dvdz = drdz * dVdr + dsdz * dVds + dtdz * dVdt;
+          const dfloat dwdx = drdx * dWdr + dsdx * dWds + dtdx * dWdt;
+          const dfloat dwdy = drdy * dWdr + dsdy * dWds + dtdy * dWdt;
+          const dfloat dwdz = drdz * dWdr + dsdz * dWds + dtdz * dWdt;
+          const dfloat asum = dudx * dudx + dudy * dudy + dudz * dudz + dvdx * dvdx + dvdy * dvdy +
+                              dvdz * dvdz + dwdx * dwdx + dwdy * dwdy + dwdz * dwdz;
+
+          const dfloat b11 = dd * (dUdr * dUdr + dUds * dUds + dUdt * dUdt);
+          const dfloat b22 = dd * (dVdr * dVdr + dVds * dVds + dVdt * dVdt);
+          const dfloat b33 = dd * (dWdr * dWdr + dWds * dWds + dWdt * dWdt);
+          const dfloat b12 = dd * (dUdr * dVdr + dUds * dVds + dUdt * dVdt);
+          const dfloat b13 = dd * (dUdr * dWdr + dUds * dWds + dUdt * dWdt);
+          const dfloat b23 = dd * (dVdr * dWdr + dVds * dWds + dVdt * dWdt);
+          const dfloat Bb = b11 * b22 - b12 * b12 + b11 * b33 - b13 * b13 + b22 * b33 - b23 * b23;
+
+          const dlong id = e * p_Np + k * p_Nq * p_Nq + j * p_Nq + i;
+          nut[id] = (Bb > 0 && asum > 0) ? c * sqrt(Bb / asum) : 0;
+        }
+      }
+    }
+  }
+}
