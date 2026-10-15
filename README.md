@@ -11,11 +11,17 @@ COPYRIGHT (c) 2019-2023 UCHICAGO ARGONNE, LLC
 [![License](https://img.shields.io/badge/License-BSD%203--Clause-orange.svg)](https://opensource.org/licenses/BSD-3-Clause)
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.7984525.svg)](https://doi.org/10.5281/zenodo.7984525)
 
-This is the fork of NekRS which contains a series of efforts to integrate AI/ML capabilities within the flow solver. It is managed by the Leadership Computing Facility (LCF) at the Argonne National Laboratory. Please explore the other branches to see what capabilities are available and how to use them on LCF machines. This is the `master` branch, which is the same as the latest release of the official [NekRS repo](https://github.com/Nek5000/nekRS).
+This branch of NekRS-ML includes a plugin that enables communication with a SmartSim database through the use of the SmartRedis API. 
+[SmartSim](https://github.com/CrayLabs/SmartSim) and [SmartRedis](https://github.com/CrayLabs/SmartRedis) are open-source libraries developed by HPE that can be used for coupling traditional HPC applications with AI/ML functionality in situ. 
+
+Currently, this branch uses the `turbChannel_smartredis` example to demonstrate online training and inference with SmartSim/SmartRedis and NekRS. 
+In particular, an MLP which takes the streamwise velocity component at some prescribed locatio off the wall as inputs is trained to predict the wall-shear stress at the corresponding wall node. This can be thought of as a crude example of using ML to train a wall-shear stress model valuable for wall-modeled LES.
+The [instructions](#polaris-build-and-run-instructions) below detail how to build the code, train the MLP model from a live NekRS simulation on the Polaris GPU, and then perform inference with the trained model from NekRS to compare the ML predictions with the true values. 
+Note that the functions defined in the new plugin are called from `UDF_Setup()` and `UDF_ExecuteStep()` in the `.udf` file.
 
 **nekRS** is a fast and scaleable computational fluid dynamics (CFD) solver targeting HPC applications. The code started as an early fork of [libParanumal](https://github.com/paranumal/libparanumal) in 2019.
 
-Capabilities:
+Capabilities of **nekRS**:
 
 * Incompressible and low Mach-number Navier-Stokes + scalar transport 
 * High-order curvilinear conformal spectral elements in space 
@@ -30,83 +36,81 @@ Capabilities:
 * VisIt & Paraview support for data analysis and visualization
 * Legacy interface to [Nek5000](https://github.com/Nek5000/Nek5000) 
 
-## Build Instructions
 
-Requirements:
-* Linux, Mac OS X (Microsoft WSL and Windows is not supported) 
-* C++17/C99 compatible compiler
-* GNU/Intel/NVHPC Fortran compiler
-* MPI-3.1 or later
-* CMake version 3.18 or later 
+## ALCF Polaris Build and Run Instructions
 
-Download the latest release available under
+### Installing SmartSim and SmartRedis
 
+To install SmartSim and SmartRedis on Polaris, follow the instructions on the [ALCF documentation page.](https://docs.alcf.anl.gov/polaris/workflows/smartsim/) 
+SmartSim is needed to run the Python workflow driver, while the SmartRedis headers and library are needed by NekRS-ML to use the smartredis plugin.
+
+
+### Building NekRS-ML
+
+Clone the repository and switch to the current `smartredis` branch
 ```sh
-https://github.com/argonne-lcf/nekRS-ML/archive/refs/heads/master.zip
+git clone https://github.com/argonne-lcf/nekRS-ML.git
+cd nekRS-ML
+git checkout smartredis
 ```
 
-or clone our GitHub repository:
-
+From an interactive session on a compute node, set the build and run environment (this follows from the [ALCF documentation](https://docs.alcf.anl.gov/polaris/workflows/smartsim/) for building SmartSim and SmartRedis).
 ```sh
-https://github.com/argonne-lcf/nekRS-ML.git
-```
-The `master` branch always points to the latest stable release while `next`
-provides an early preview of the next upcoming release (do not use in a production environment).
+module use /soft/modulefiles
+module load conda/2024-04-29
+conda activate base
+source </path/to/venv>/_ssim_env/_bin/activate
 
-#
-To build and install the code run:
-
-```sh
-CC=mpicc CXX=mpic++ FC=mpif77 ./nrsconfig [-DCMAKE_INSTALL_PREFIX=$HOME/.local/nekrs]
-```
-Build settings can be customized through CMake options passed to `nrsconfig`. 
-Please remove the previous build and installation directory in case of an update. 
-
-## Setting the Enviroment
-
-Assuming you run `bash` and your install directory is $HOME/.local/nekrs, 
-add the following line to your $HOME/.bash_profile:
-
-```sh
-export NEKRS_HOME=$HOME/.local/nekrs
-export PATH=$NEKRS_HOME/bin:$PATH
-```
-then type `source $HOME/.bash_profile` in the current terminal window. 
-
-## Run the Code
-
-We try hard not to break userland but the code is evolving quickly so things might change from one version to another without being backward compatible. Please consult `RELEASE.md` *before* using the code. 
-
-```sh
-cd $NEKRS_HOME/examples/turbPipePeriodic
-mpirun -np 2 nekrs --setup turbPipe.par
-```
-For convenience we provide various launch scripts in the `bin` directory.
-
-## Polaris Instructions
-
-Set the envirnment with
-```sh
-module swap PrgEnv-nvhpc PrgEnv-gnu
-module load cudatoolkit-standalone
-module load cmake
-module unload cray-libsci
 export CRAY_ACCEL_TARGET=nvidia80
-```
-
-and build the code with
-```sh
-CC=cc CXX=CC FC=ftn ./nrsconfig -DCMAKE_INSTALL_PREFIX=</path/to/install/dir>
-```
-where `</path/to/install/dir>` can be a user's home directory or a project space.
-
-Then run the examples with
-```sh
 export NEKRS_HOME=</path/to/install/dir>
 export PATH=$NEKRS_HOME/bin:$PATH
-cd examples/ktauChannel
-mpiexec -n 4 --ppn 4 --cpu-bind numa nekrs --setup channel.par
+export TORCH_PATH=$( python -c 'import torch; print(torch.__path__[0])' )
+export LD_LIBRARY_PATH=$TORCH_PATH/lib:$LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=</path/to/venv>/SmartRedis/install/lib:$LD_LIBRARY_PATH
 ```
+where `</path/to/install/dir>` and `</path/to/venv>` can be a user's home directory or a project space.
+
+and build the code
+```sh
+CC=cc CXX=CC FC=ftn ./nrsconfig -DCMAKE_INSTALL_PREFIX=$NEKRS_HOME -DENABLE_SMARTREDIS=1 -DSMARTREDIS_PATH=</path/to/venv>/SmartRedis
+``` 
+Note that this version of NekRS requires the additional arguments `-DENABLE_SMARTREDIS=1 -DSMARTREDIS_PATH=</path/to/SmartRedis>` to the config script.
+
+### Running with a Colocated Database
+
+From an interactive session on a compute node, source the build environment outlined above and run the online training example with the colocated database deployment with 
+```sh
+./run_train_colocated.sh
+```
+This script runs NekRS in parallel on the first 2 GPU of a Polaris node, the ML distributed training on the other 2 GPU of the node, and a colocated SmartSim Orchestrator (the database) on the CPU of the same node. 
+The example produces the log files `nekrs.out`, `nekrs.err`, `train.out`, and `train.err` for NekRS and the ML training, respectively, and saves the trained model to file in normal and jitted formats as `model.pt` and `model_jit.pt`, respectively. Note that the output and error files will be located in the `nekRS-ML` directory, created by SmartSim in the working directory where the script is launched. 
+
+Then, run the online inference example with
+```sh
+ ./run_inference_colocated.sh
+```
+This example runs NekRS in parallel on the first 3 GPU and performs ML inference on the fourth GPU. Once again, it also launched a colocated SmartSim Orchestrator (the database) on the CPU of the same node. 
+The example produces the log files `nekrs.out` and `nekrs.err`.
+
+Note that the full list of configuration options to set up the training and inference runs can be found in `conf/ssim_config.yaml`.
+
+This example was also a demo for the [2023 ALCF Hands-On HPC Workshop](https://github.com/argonne-lcf/ALCF_Hands_on_HPC_Workshop/tree/master/couplingSimulationML), and more information on coupling simulation and AI/ML and this example can be dound there.
+
+### Running with a Clustered Database
+
+From an interactive session with **three** compute nodes, source the build environment outlined above and run the online training example with the clustered database deployment with 
+```sh
+./run_train_clustered.sh
+```
+This script runs NekRS in parallel on the first node using all 4 GPU, the SmartSim Orchestrator (the database) on the second node, and the ML distributed training on the third node using all 4 GPU.
+The example produces the log files `nekrs.out`, `nekrs.err`, `train.out`, and `train.err` for NekRS and the ML training, respectively, and saves the trained model to file in normal and jitted formats as `model.pt` and `model_jit.pt`, respectively. Note that the output and error files will be located in the `nekRS-ML` directory, created by SmartSim in the working directory where the script is launched. 
+
+Then, run the online inference example with
+```sh
+ ./run_inference_clustered.sh
+```
+This example runs NekRS in parallel on the first node using all 4 GPU and performs ML inference on the GPU of the second node, where the SmartSim Orchestrator is launched. In this case, only **two** nodes are needed, meaning that if three nodes were requested as described above, the third node is idle during inference. 
+The example produces the log files `nekrs.out` and `nekrs.err`.
 
 ## Documentation 
 For documentation, see our [readthedocs page](https://nekrs.readthedocs.io/en/latest/). For now it's just a dummy. We hope to improve it soon. 
