@@ -3,6 +3,8 @@ c-----------------------------------------------------------------------
       include 'SIZE'
       include 'TOTAL'
 
+      if(istep.eq.0) call gfldr('restart.fld')
+
       return
       end
 c-----------------------------------------------------------------------
@@ -28,7 +30,7 @@ c-----------------------------------------------------------------------
       do i=1,n
          xc(i,1) = xscale*xc(i,1)
          yc(i,1) = yscale*yc(i,1)
-         yc(i,1) = tanh(BETAM*(2*yc(i,1)-1))/tanh(BETAM)
+cc         yc(i,1) = tanh(BETAM*(2*yc(i,1)-1))/tanh(BETAM)
          zc(i,1) = zscale*zc(i,1)
       enddo
 

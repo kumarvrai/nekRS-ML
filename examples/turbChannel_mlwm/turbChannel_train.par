@@ -1,18 +1,19 @@
 [GENERAL]
 #verbose = true
-polynomialOrder = 4
-startFrom = "restart.fld"+time=0
+polynomialOrder = 6
+#startFrom = "restart.fld"+time=0
+startFrom = "base.fld"
 stopAt = endTime
 endTime = 400
 
-dt = targetCFL=1 + max=2e-2 + initial=5e-3
+dt = targetCFL=0.5 + max=2e-2 + initial=5e-3
 timeStepper = tombo2
 
 writeControl = simulationTime 
 writeInterval = 10
 
-regularization = hpfrt + nModes=1 + scalingCoeff=5
-#constFlowRate = meanVelocity=1.0 + direction=X
+#regularization = hpfrt + nModes=1 + scalingCoeff=5
+constFlowRate = meanVelocity=1.0 + direction=X
 
 [PRESSURE]
 residualTol = 1e-04
@@ -33,3 +34,7 @@ number_elements_x = 36
 number_elements_y = 16
 number_elements_z = 18
 tAvgWriteInterval=5000
+
+[TEMPERATURE]
+boundaryTypeMap = none
+solver = none

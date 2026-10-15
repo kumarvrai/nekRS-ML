@@ -1,32 +1,61 @@
-#!/bin/bash -l
-#PBS -l select=1:system=polaris
-#PBS -l place=scatter
-#PBS -l filesystems=home:grand
-#PBS -l walltime=00:30:00
-##PBS -q preemptable
-#PBS -q debug
-#PBS -A EnergyApps
-#PBS -o out.o
-#PBS -e error.e
+#!/bin/bash
+### Job name on queue
+#SBATCH --job-name=nekrs_mlwm
 
-INS_DIR=/home/kumarv/install_nrsml/
-module use /soft/modulefiles
-module load conda/2024-04-29
-conda activate base
-source $INS_DIR/smartnekrs-env/bin/activate
+### Output and error files directory
+#SBATCH -D .
 
-export HYDRA_FULL_ERROR=1
-export CRAY_ACCEL_TARGET=nvidia80
-export NEKRS_HOME=/home/kumarv/.local/nekrs-ml-bsc
-#export NEKRS_HOME=/home/kumarv/.local/nekrs-ml-vish
+### Output and error files
+#SBATCH --output=out.o
+#SBATCH --error=error.e
+
+### Run configuration
+### Rule: {ntasks-per-node} \times {cpus-per-task} = 80
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=4
+#SBATCH --cpus-per-task=20
+#SBATCH --gres=gpu:4
+
+### Queue and account
+##SBATCH --qos=acc_bsccase
+##SBATCH --time=2-00:00:00
+#SBATCH --qos=acc_debug
+#SBATCH --time=02:00:00
+#SBATCH --account=bsc21
+##sbatch --dependency=afterany:9878054
+
+### MN% modules
+BASE_DIR=/home/bsc/bsc021712/install_nrsml/
+module purge
+#module getdefault nekrs
+##module getdefault nekrs-cuda11
+#module load miniforge
+#source activate smartsim
+##module load nvidia-hpc-sdk/24.3 hdf5/1.14.1-2-nvidia-nvhpcx cmake
+##module load miniforge
+##source activate smartsim-nvhpc
+module getdefault sod2d
+module unload python
+module load miniforge
+source activate smartsim-nvhpc
+
+export NEKRS_HOME=$HOME/.local/nekrs_v23_ml
 export PATH=$NEKRS_HOME/bin:$PATH
+
+export SMARTREDIS_DIR=/apps/ACC/MINIFORGE/24.3.0-0/envs/smartsim-nvhpc/
+export SMARTSIM_REDISAI=1.2.7
+export PATH=$SMARTREDIS_DIR/bin:$PATH
+export LD_LIBRARY_PATH=$SMARTREDIS_DIR/lib:$LD_LIBRARY_PATH
 #export TORCH_PATH=$( python -c 'import torch; print(torch.__path__[0])' )
-#export TORCH_PATH=/soft/applications/conda/2024-04-29/mconda3/lib/python3.11/site-packages/torch
-export LD_LIBRARY_PATH=$TORCH_PATH/lib:$LD_LIBRARY_PATH
-export LD_LIBRARY_PATH=$INS_DIR/SmartRedis/install/lib:$LD_LIBRARY_PATH
-export LD_LIBRARY_PATH=$INS_DIR/SmartRedis/install/lib64:$LD_LIBRARY_PATH
+#export LD_LIBRARY_PATH=$TORCH_PATH/lib:$LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=$SMARTREDIS_DIR/lib:$LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=$SMARTREDIS_DIR/lib64:$LD_LIBRARY_PATH
 
-cd $PBS_O_WORKDIR
+#echo $SLURM_JOBID 
+#echo $SLURM_SUBMIT_DIR 
+#echo $SLURM_SUBMIT_HOST 
+#echo $SLURM_JOB_NODELIST 
+#echo $SLURM_ARRAY_TASK_ID
 
-${PWD}/run_train_colocated.sh
-#${PWD}/run_inference_colocated.sh
+./run_train_colocated.sh
+#./run_inference_colocated.sh

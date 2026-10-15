@@ -1,0 +1,571 @@
+# general imports
+import os
+import sys 
+import re
+from omegaconf import DictConfig, OmegaConf
+import hydra
+
+# smartsim and smartredis imports
+from smartsim import Experiment
+from smartsim.settings import RunSettings, PalsMpiexecSettings
+from smartsim._core.utils.helpers import installed_redisai_backends
+
+
+## Define function to parse node list
+def parseNodeList(fname):
+    with open(fname) as file:
+        nodelist = file.readlines()
+        nodelist = [line.rstrip() for line in nodelist]
+        nodelist = [line.split('.')[0] for line in nodelist]
+    nNodes = len(nodelist)
+    return nodelist, nNodes
+
+def parse_slurm_nodelist(nodelist: str) -> tuple:
+    """
+    Parses the SLURM_JOB_NODELIST string and returns a complete list of node names
+    along with the total number of nodes.
+
+    Args:
+        nodelist (str): SLURM_JOB_NODELIST string (e.g., "as02r3b[08,23],as02r4b01")
+
+    Returns:
+        tuple: (list of node names, total number of nodes)
+    """
+    nodes = []
+
+    # Split by commas that are outside brackets
+    parts = re.split(r",(?![^\[]*\])", nodelist)
+
+    for part in parts:
+        match = re.match(r"([a-zA-Z0-9-]+)\[(.*)\]", part)
+        if match:
+            prefix, ranges = match.groups()
+            for subpart in ranges.split(","):
+                if "-" in subpart:  # Handle numeric ranges like 02-04
+                    start, end = map(int, subpart.split("-"))
+                    width = len(subpart.split("-")[0])  # Preserve zero-padding
+                    nodes.extend([f"{prefix}{i:0{width}d}" for i in range(start, end + 1)])
+                else:
+                    nodes.append(f"{prefix}{subpart}")
+        else:
+            nodes.append(part)  # Single node case
+
+    return nodes, len(nodes)
+
+## Co-located DB launch
+def launch_coDB(cfg, nodelist, nNodes):
+    # Print nodelist
+    if (nodelist is not None):
+        print(f"\nRunning on {nNodes} total nodes on Polaris")
+        print(nodelist, "\n")
+        hosts = ','.join(nodelist)
+
+    # Initialize the SmartSim Experiment
+    print(f"\nLoading previous experiment: {cfg.database.load_exp}")
+    print(f"Loading NekRS executible   : {cfg.sim.executable}")
+    print(f"Loading Train executible   : {cfg.train.executable}")
+    print(f"\n")
+    PORT = cfg.database.port
+    if (cfg.database.load_exp):
+      exp = Experiment(cfg.database.exp_name, exp_path=cfg.database.exp_name,launcher=cfg.database.launcher)
+    else:  
+      exp = Experiment(cfg.database.exp_name, launcher=cfg.database.launcher)
+
+    # Set the run settings, including the client executable and how to run it
+    client_exe = cfg.sim.executable
+    if (cfg.database.launcher=='local'):
+        nrs_settings = RunSettings(client_exe,
+                           exe_args=cfg.sim.arguments,
+                           run_command='mpirun',
+                           run_args={"-n" : cfg.run_args.simprocs},
+                           env_vars=None)
+    elif (cfg.database.launcher=='pals'):
+        nrs_settings = PalsMpiexecSettings(
+                           client_exe,
+                           exe_args=None,
+                           run_args=None,
+                           env_vars={'MPICH_OFI_CXI_PID_BASE':str(0)})
+        nrs_settings.set_tasks(cfg.run_args.simprocs)
+        nrs_settings.set_tasks_per_node(cfg.run_args.simprocs_pn)
+        nrs_settings.set_hostlist(hosts)
+        nrs_settings.set_cpu_binding_type(cfg.run_args.sim_cpu_bind)
+        nrs_settings.add_exe_args(cfg.sim.arguments)
+        if (cfg.sim.affinity):
+            nrs_settings.set_gpu_affinity_script(cfg.sim.affinity,
+                                                 cfg.run_args.simprocs_pn)
+    elif (cfg.database.launcher=='slurm'):
+        nrs_settings = RunSettings(client_exe,
+                           exe_args=cfg.sim.arguments,
+                           run_command='mpirun',
+                           run_args={"-n" : cfg.run_args.simprocs},
+                           env_vars=None)
+
+    # Create the co-located database model
+    colo_model = exp.create_model("nekrs", nrs_settings)
+    kwargs = {
+        'maxclients': 100000,
+        'threads_per_queue': 4, # set to 4 for improved performance
+        'inter_op_parallelism': 1,
+        'intra_op_parallelism': 1,
+        'cluster-node-timeout': 30000,
+        }
+    db_bind = None if cfg.run_args.db_cpu_bind=='None' else cfg.run_args.db_cpu_bind
+    if (cfg.database.network_interface=='uds'):
+        colo_model.colocate_db_uds(
+                db_cpus=cfg.run_args.dbprocs_pn,
+                custom_pinning=db_bind,
+                debug=False,
+                **kwargs
+                )
+    else:
+        colo_model.colocate_db_tcp(
+                port=PORT,
+                ifname=cfg.database.network_interface,
+                db_cpus=cfg.run_args.dbprocs_pn,
+                custom_pinning=db_bind,
+                debug=False,
+                **kwargs
+                )
+    
+    # Load a model for inference
+    if (cfg.inference.model_path):
+        print(cfg.inference.model_path,flush=True)
+        print(cfg.inference.backend,flush=True)
+        print(cfg.inference.device,flush=True)
+        print(cfg.inference.batch,flush=True)
+        print(cfg.inference.devices_per_node,flush=True)
+        colo_model.add_ml_model('model',
+                                cfg.inference.backend,
+                                model=None,  # this is used if model is in memory
+                                model_path=cfg.inference.model_path,
+                                device=cfg.inference.device,
+                                batch_size=cfg.inference.batch,
+                                min_batch_size=cfg.inference.batch,
+                                devices_per_node=cfg.inference.devices_per_node,
+                                inputs=None, outputs=None)
+
+    # Start the co-located model
+    block = False if cfg.train.executable else True
+    print("Launching NekRS and SmartSim co-located DB ... ")
+    if len(cfg.sim.copy_files)>0 or len(cfg.sim.link_files)>0:
+        colo_model.attach_generator_files(to_copy=list(cfg.sim.copy_files), to_symlink=list(cfg.sim.link_files))
+    if (cfg.database.load_exp == False):
+      exp.generate(colo_model, overwrite=True)
+    exp.start(colo_model, block=block, summary=True)
+    #exp.summary(style="html")
+    print("Done\n")
+
+    # Setup and launch the training script
+    if (cfg.train.executable):
+        ml_exe = cfg.train.executable
+        ml_exe = ml_exe + f' --dbnodes={cfg.run_args.db_nodes}' \
+                        + f' --device={cfg.train.device}' \
+                        + f' --ppn={cfg.run_args.mlprocs_pn}' \
+                        + f' --logging={cfg.train.logging}'
+        SSDB = colo_model.run_settings.env_vars['SSDB']
+        if (cfg.database.launcher=='local'):
+            ml_settings = RunSettings(
+                           'python',
+                           exe_args=ml_exe,
+                           run_command='mpirun',
+                           run_args={"-n" : cfg.run_args.mlprocs},
+                           env_vars={'SSDB' : SSDB})
+        elif (cfg.database.launcher=='pals'):
+            ml_settings = PalsMpiexecSettings(
+                           'python',
+                           exe_args=ml_exe,
+                           run_args=None,
+                           env_vars={'SSDB':SSDB, 'MPICH_OFI_CXI_PID_BASE':str(1)})
+            ml_settings.set_tasks(cfg.run_args.mlprocs)
+            ml_settings.set_tasks_per_node(cfg.run_args.mlprocs_pn)
+            ml_settings.set_hostlist(hosts)
+            ml_settings.set_cpu_binding_type(cfg.run_args.ml_cpu_bind)
+            if (cfg.train.affinity):
+                ml_settings.set_gpu_affinity_script(cfg.train.affinity,
+                                                    cfg.run_args.mlprocs_pn,
+                                                    cfg.run_args.simprocs_pn)
+        elif (cfg.database.launcher=='slurm'):
+            ml_settings = RunSettings(
+                           'python',
+                           exe_args=ml_exe,
+                           run_command='mpirun',
+                           run_args={"-n" : cfg.run_args.mlprocs},
+                           env_vars={'SSDB' : SSDB})
+        
+        print("Launching training script ... ")
+        #model_settings = exp.create_run_settings(exe="echo", exe_args="Hello World")
+        #ml_model = exp.create_model(name="train", run_settings=model_settings)
+        ml_model = exp.create_model("train", ml_settings)
+        if len(cfg.train.copy_files)>0 or len(cfg.train.link_files)>0:
+            ml_model.attach_generator_files(to_copy=list(cfg.train.copy_files), to_symlink=list(cfg.train.link_files))
+        if (cfg.database.load_exp == False):
+          exp.generate(ml_model, overwrite=True)
+        exp.start(ml_model, block=True, summary=True)
+        print("Done\n")
+
+
+## Clustered DB launch
+def launch_clDB(cfg, nodelist, nNodes):
+    # Split nodes between the components
+    dbNodes_list = None
+    if (nodelist is not None):
+        simNodes = ','.join(nodelist[0: cfg.run_args.sim_nodes])
+        dbNodes = ','.join(nodelist[cfg.run_args.sim_nodes: \
+                                cfg.run_args.sim_nodes + cfg.run_args.db_nodes])
+        dbNodes_list = nodelist[cfg.run_args.sim_nodes: \
+                                cfg.run_args.sim_nodes + cfg.run_args.db_nodes]
+        if cfg.train.executable:
+            mlNodes = ','.join(nodelist[cfg.run_args.sim_nodes + cfg.run_args.db_nodes: \
+                                    cfg.run_args.sim_nodes + cfg.run_args.db_nodes + \
+                                    cfg.run_args.ml_nodes])
+        print(f"Database running on {cfg.run_args.db_nodes} nodes:")
+        print(dbNodes)
+        print(f"Simulatiom running on {cfg.run_args.sim_nodes} nodes:")
+        print(simNodes)
+        if cfg.train.executable:
+            print(f"ML running on {cfg.run_args.ml_nodes} nodes:")
+            print(mlNodes)
+
+    # Set up database and start it
+    PORT = cfg.database.port
+    exp = Experiment(cfg.database.exp_name, launcher=cfg.database.launcher)
+    if (cfg.database.launcher=='pals'): 
+      runArgs = {"np": 1, "ppn": 1, "cpu-bind": "numa"}
+    else:  
+      runArgs = {"np": 1}
+    kwargs = {
+        'maxclients': 100000,
+        'threads_per_queue': 4, # set to 4 for improved performance
+        'inter_op_parallelism': 1,
+        'intra_op_parallelism': cfg.run_args.cores_pn,
+        'cluster-node-timeout': 30000,
+        }
+    if (cfg.database.backend == "keydb"):
+        kwargs['server_threads'] = 2 # keydb only
+    if (cfg.database.launcher=='local'): run_command = 'mpirun'
+    elif (cfg.database.launcher=='pals'): run_command = 'mpiexec'
+    elif (cfg.database.launcher=='slurm'): run_command = 'mpirun'
+    network = cfg.database.network_interface if type(cfg.database.network_interface)==str \
+                                             else OmegaConf.to_object(cfg.database.network_interface)
+    db = exp.create_database(port=PORT, 
+                             batch=False,
+                             db_nodes=cfg.run_args.db_nodes,
+                             run_command=run_command,
+                             interface=network, 
+                             hosts=dbNodes_list,
+                             run_args=runArgs,
+                             single_cmd=True,
+                             **kwargs
+                            )
+    exp.generate(db)
+    print("\nStarting database ...")
+    exp.start(db)
+    print("Done\n")
+
+    # Set the run settings, including the client executable and how to run it
+    client_exe = cfg.sim.executable
+    if (cfg.database.launcher=='local'):
+        nrs_settings = RunSettings(client_exe,
+                                   exe_args=None,
+                                   run_command='mpirun',
+                                   run_args={"-n" : cfg.run_args.simprocs},
+                                   env_vars=None)
+    elif (cfg.database.launcher=='pals'):
+        nrs_settings = PalsMpiexecSettings(client_exe,
+                                           exe_args=None,
+                                           run_args=None,
+                                           env_vars=None)
+        nrs_settings.set_tasks(cfg.run_args.simprocs)
+        nrs_settings.set_tasks_per_node(cfg.run_args.simprocs_pn)
+        nrs_settings.set_hostlist(simNodes)
+        nrs_settings.set_cpu_binding_type(cfg.run_args.sim_cpu_bind)
+        nrs_settings.add_exe_args(cfg.sim.arguments)
+        if (cfg.sim.affinity):
+            nrs_settings.set_gpu_affinity_script(cfg.sim.affinity,
+                                                 cfg.run_args.simprocs_pn)
+    elif (cfg.database.launcher=='slurm'):
+        nrs_settings = RunSettings(client_exe,
+                                   exe_args=None,
+                                   run_command='mpirun',
+                                   run_args={"-n" : cfg.run_args.simprocs},
+                                   env_vars=None)
+
+    nrs_model = exp.create_model("nekrs", nrs_settings)
+
+    # Load a model for inference
+    if (cfg.inference.model_path):
+        nrs_model.add_ml_model('model',
+                                cfg.inference.backend,
+                                model=None,  # this is used if model is in memory
+                                model_path=cfg.inference.model_path,
+                                device=cfg.inference.device,
+                                batch_size=cfg.inference.batch,
+                                min_batch_size=cfg.inference.batch,
+                                devices_per_node=cfg.inference.devices_per_node,
+                                inputs=None, outputs=None)
+
+    # Start the client model
+    print("Launching the CFD ...")
+    block = False if cfg.train.executable else True
+    if len(cfg.sim.copy_files)>0 or len(cfg.sim.link_files)>0:
+        nrs_model.attach_generator_files(to_copy=list(cfg.sim.copy_files), to_symlink=list(cfg.sim.link_files))
+    exp.generate(nrs_model, overwrite=True)
+    exp.start(nrs_model, summary=False, block=block)
+    print("Done\n")
+    
+    # Setup and launch the training script
+    if (cfg.train.executable):
+        ml_exe = cfg.train.executable
+        ml_exe = ml_exe + f' --dbnodes={cfg.run_args.db_nodes}' \
+                        + f' --device={cfg.train.device}' \
+                        + f' --ppn={cfg.run_args.mlprocs_pn}' \
+                        + f' --logging={cfg.train.logging}'
+        if (cfg.database.launcher=='local'):
+            ml_settings = RunSettings(
+                           'python',
+                           exe_args=ml_exe,
+                           run_command='mpirun',
+                           run_args={"-n" : cfg.run_args.mlprocs},
+                           env_vars=None)
+        elif (cfg.database.launcher=='pals'):
+            ml_settings = PalsMpiexecSettings(
+                           'python',
+                           exe_args=ml_exe,
+                           run_args=None,
+                           env_vars=None)
+            ml_settings.set_tasks(cfg.run_args.mlprocs)
+            ml_settings.set_tasks_per_node(cfg.run_args.mlprocs_pn)
+            ml_settings.set_hostlist(mlNodes)
+            ml_settings.set_cpu_binding_type(cfg.run_args.ml_cpu_bind)
+            if (cfg.train.affinity):
+                ml_settings.set_gpu_affinity_script(cfg.train.affinity,
+                                                    cfg.run_args.mlprocs_pn,
+                                                    0)
+        elif (cfg.database.launcher=='slurm'):
+            ml_settings = RunSettings(
+                           'python',
+                           exe_args=ml_exe,
+                           run_command='mpirun',
+                           run_args={"-n" : cfg.run_args.mlprocs},
+                           env_vars=None)
+        
+        print("Launching training script ... ")
+        ml_model = exp.create_model("train", ml_settings)
+        if len(cfg.train.copy_files)>0 or len(cfg.train.link_files)>0:
+            ml_model.attach_generator_files(to_copy=list(cfg.train.copy_files), to_symlink=list(cfg.train.link_files))
+        exp.generate(ml_model, overwrite=True)
+        exp.start(ml_model, block=True, summary=False)
+        print("Done\n")
+    
+    # Stop database
+    print("Stopping the Orchestrator ...")
+    exp.stop(db)
+    print("Done\n")
+
+## Distributed DB launch
+def launch_diDB(cfg, nodelist, nNodes):
+    # Split nodes between the components
+    dbNodes_list = None
+    if (nodelist is not None):
+        dbNodes_list = nodelist
+        simNodes = ','.join(nodelist[0: cfg.run_args.sim_nodes])
+        dbNodes = ','.join(nodelist[cfg.run_args.sim_nodes: \
+                                cfg.run_args.sim_nodes + cfg.run_args.db_nodes])
+        if cfg.train.executable:
+            mlNodes = ','.join(nodelist[cfg.run_args.sim_nodes : \
+                                    cfg.run_args.sim_nodes + \
+                                    cfg.run_args.ml_nodes])
+        print(f"Database running on {cfg.run_args.db_nodes} nodes:")
+        print(dbNodes_list)
+        print(f"Simulatiom running on {cfg.run_args.sim_nodes} nodes:")
+        print(simNodes)
+        if cfg.train.executable:
+            print(f"ML running on {cfg.run_args.ml_nodes} nodes:")
+            print(mlNodes)
+
+    # Set up database and start it
+    PORT = cfg.database.port
+    exp = Experiment(cfg.database.exp_name, launcher=cfg.database.launcher)
+    if (cfg.database.launcher=='pals'): 
+      runArgs = {"np": 1, "ppn": 1, "cpu-bind": "numa"}
+    else:  
+      runArgs = {}
+    kwargs = {
+    }
+    #kwargs = {
+    #    'maxclients': 100000,
+    #    'threads_per_queue': 4, # set to 4 for improved performance
+    #    'inter_op_parallelism': 1,
+    #    'intra_op_parallelism': cfg.run_args.cores_pn,
+    #    'cluster-node-timeout': 30000,
+    #    }
+    if (cfg.database.backend == "keydb"):
+        kwargs['server_threads'] = 2 # keydb only
+    if (cfg.database.launcher=='local'): run_command = 'mpirun'
+    elif (cfg.database.launcher=='pals'): run_command = 'mpiexec'
+    elif (cfg.database.launcher=='slurm'): run_command = 'mpirun'
+    network = cfg.database.network_interface if type(cfg.database.network_interface)==str \
+                                             else OmegaConf.to_object(cfg.database.network_interface)
+    db = exp.create_database(port=PORT, 
+                             batch=False,
+                             db_nodes=cfg.run_args.db_nodes,
+                             run_command=run_command,
+                             interface=network, 
+                             hosts=dbNodes_list,
+                             run_args=runArgs,
+                             single_cmd=True,
+                             **kwargs
+                            )
+    #exp.generate(db)
+    print("\nStarting database ...")
+    exp.start(db, block=True)
+    print("Done\n")
+
+    # Set the run settings, including the client executable and how to run it
+    client_exe = cfg.sim.executable
+    if (cfg.database.launcher=='local'):
+        nrs_settings = RunSettings(client_exe,
+                                   exe_args=None,
+                                   run_command='mpirun',
+                                   run_args={"-n" : cfg.run_args.simprocs},
+                                   env_vars=None)
+    elif (cfg.database.launcher=='pals'):
+        nrs_settings = PalsMpiexecSettings(client_exe,
+                                           exe_args=None,
+                                           run_args=None,
+                                           env_vars=None)
+        nrs_settings.set_tasks(cfg.run_args.simprocs)
+        nrs_settings.set_tasks_per_node(cfg.run_args.simprocs_pn)
+        nrs_settings.set_hostlist(simNodes)
+        nrs_settings.set_cpu_binding_type(cfg.run_args.sim_cpu_bind)
+        nrs_settings.add_exe_args(cfg.sim.arguments)
+        if (cfg.sim.affinity):
+            nrs_settings.set_gpu_affinity_script(cfg.sim.affinity,
+                                                 cfg.run_args.simprocs_pn)
+    elif (cfg.database.launcher=='slurm'):
+        nrs_settings = RunSettings(client_exe,
+                                   exe_args=None,
+                                   run_command='mpirun',
+                                   run_args={"-n" : cfg.run_args.simprocs},
+                                   env_vars=None)
+
+    nrs_model = exp.create_model("nekrs", nrs_settings)
+
+    # Load a model for inference
+    if (cfg.inference.model_path):
+        nrs_model.add_ml_model('model',
+                                cfg.inference.backend,
+                                model=None,  # this is used if model is in memory
+                                model_path=cfg.inference.model_path,
+                                device=cfg.inference.device,
+                                batch_size=cfg.inference.batch,
+                                min_batch_size=cfg.inference.batch,
+                                devices_per_node=cfg.inference.devices_per_node,
+                                inputs=None, outputs=None)
+
+    # Start the client model
+    print("Launching the CFD ...")
+    block = False if cfg.train.executable else True
+    if len(cfg.sim.copy_files)>0 or len(cfg.sim.link_files)>0:
+        nrs_model.attach_generator_files(to_copy=list(cfg.sim.copy_files), to_symlink=list(cfg.sim.link_files))
+    exp.generate(nrs_model, overwrite=True)
+    exp.start(nrs_model, summary=False, block=block)
+    print("Done\n")
+    
+    # Setup and launch the training script
+    if (cfg.train.executable):
+        ml_exe = cfg.train.executable
+        ml_exe = ml_exe + f' --dbnodes={cfg.run_args.db_nodes}' \
+                        + f' --device={cfg.train.device}' \
+                        + f' --ppn={cfg.run_args.mlprocs_pn}' \
+                        + f' --logging={cfg.train.logging}'
+        if (cfg.database.launcher=='local'):
+            ml_settings = RunSettings(
+                           'python',
+                           exe_args=ml_exe,
+                           run_command='mpirun',
+                           run_args={"-n" : cfg.run_args.mlprocs},
+                           env_vars=None)
+        elif (cfg.database.launcher=='pals'):
+            ml_settings = PalsMpiexecSettings(
+                           'python',
+                           exe_args=ml_exe,
+                           run_args=None,
+                           env_vars=None)
+            ml_settings.set_tasks(cfg.run_args.mlprocs)
+            ml_settings.set_tasks_per_node(cfg.run_args.mlprocs_pn)
+            ml_settings.set_hostlist(mlNodes)
+            ml_settings.set_cpu_binding_type(cfg.run_args.ml_cpu_bind)
+            if (cfg.train.affinity):
+                ml_settings.set_gpu_affinity_script(cfg.train.affinity,
+                                                    cfg.run_args.mlprocs_pn,
+                                                    0)
+        elif (cfg.database.launcher=='slurm'):
+            ml_settings = RunSettings(
+                           'python',
+                           exe_args=ml_exe,
+                           run_command='mpirun',
+                           run_args={"-n" : cfg.run_args.mlprocs},
+                           env_vars=None)
+        
+        print("Launching training script ... ")
+        ml_model = exp.create_model("train", ml_settings)
+        if len(cfg.train.copy_files)>0 or len(cfg.train.link_files)>0:
+            ml_model.attach_generator_files(to_copy=list(cfg.train.copy_files), to_symlink=list(cfg.train.link_files))
+        exp.generate(ml_model, overwrite=True)
+        exp.start(ml_model, block=True, summary=False)
+        print("Done\n")
+    
+    # Stop database
+    print("Stopping the Orchestrator ...")
+    exp.stop(db)
+    print("Done\n")
+
+
+## Main function
+@hydra.main(version_base=None, config_path="./conf", config_name="ssim_config")
+def main(cfg: DictConfig):
+    print('--||SSIM :: Available backends ',installed_redisai_backends())
+    # Get nodes of this allocation (job)
+    nodelist = nNodes = None
+    if (cfg.database.launcher=='pals'):
+        #hostfile = os.getenv('PBS_NODEFILE')
+        #nodelist, nNodes = parseNodeList(hostfile)
+        hostfile = os.getenv('SLURM_JOB_NODELIST')
+        nodelist = hostfile
+        nNodes   = 1
+        print(nodelist)
+
+    if (cfg.database.launcher=='slurm'):
+        nodestring = os.getenv('SLURM_JOB_NODELIST')
+        nodelist, nNodes = parse_slurm_nodelist(nodestring)
+
+    # Export KeyDB env variables if requested instead of Redis
+    if (cfg.database.backend == "keydb"):
+        stream = os.popen("which python")
+        prefix = stream.read().split("ssim")[0]
+        keydb_conf = prefix+"SmartSim/smartsim/_core/config/keydb.conf"
+        keydb_bin = prefix+"keydb/src/keydb-server"
+        os.environ['REDIS_PATH'] = keydb_bin
+        os.environ['REDIS_CONF'] = keydb_conf
+
+    # Call appropriate launcher
+    if (cfg.database.deployment == "colocated"):
+        print(f"\nRunning {cfg.database.deployment} DB with {cfg.database.backend} backend\n")
+        launch_coDB(cfg, nodelist, nNodes)
+    elif (cfg.database.deployment == "clustered"):
+        print(f"\nRunning {cfg.database.deployment} DB with {cfg.database.backend} backend\n")
+        launch_clDB(cfg, nodelist, nNodes)
+    elif (cfg.database.deployment == "distributed"):
+        print(f"\nRunning {cfg.database.deployment} DB with {cfg.database.backend} backend\n")
+        launch_diDB(cfg, nodelist, nNodes)
+    else:
+        print("\nERROR: Launcher is either colocated or clustered\n")
+
+    # Quit
+    print("Quitting")
+
+
+## Run main
+if __name__ == "__main__":
+    main()

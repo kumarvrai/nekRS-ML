@@ -33,10 +33,16 @@ cp turbChannel_inference.oudf turbChannel.oudf
 
 # Run the driver script
 sim_arguments="--setup turbChannel.par --backend CUDA"
-python ssim_driver_polaris.py \
-  sim.executable=$NEKRS_HOME/bin/nekrs run_args.simprocs=3 run_args.simprocs_pn=3 \
+#python ssim_driver_polaris.py \
+python ssim_driver_marenostrum.py \
+  database.load_exp=True \
+  sim.executable=$NEKRS_HOME/bin/nekrs run_args.simprocs=2 run_args.simprocs_pn=2 \
   sim.arguments="${sim_arguments}" \
-  inference.model_path=./model_jit.pt inference.device=GPU:3
+  sim.copy_files=["turbChannel.oudf","turbChannel.usr","turbChannel.par","turbChannel.udf","turbChannel.re2","turbChannel.box","ci.oudf","affinity_nrs.sh","restart.fld","model_jit.pt"] \
+  inference.model_path=./model_jit.pt inference.devices_per_node=2
+  #inference.model_path=./model_jit.pt inference.device=GPU:3
+
+  #sim.link_files=["turbChannel.oudf","turbChannel.usr","turbChannel.par","turbChannel.udf","turbChannel.re2","turbChannel.box","ci.oudf","affinity_nrs.sh","restart.fld","model_jit.pt"] \
 
 rm turbChannel.box
 rm turbChannel.udf

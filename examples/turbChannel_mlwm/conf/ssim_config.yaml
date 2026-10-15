@@ -7,7 +7,8 @@ database:
     network_interface: "uds" # lo,hsn0,uds - network used for data transfer
     # On Polaris: lo hsn0 for clustered, lo and uds for co-located
     exp_name: "nekRS-ML" # string
-    launcher: "local" # pbs, cobalt - job scheduler
+    launcher: "slurm" # pbs, cobalt - job scheduler
+    load_exp: False # True,False - determine to use old experiment
 
 # Run config
 run_args:
@@ -33,8 +34,8 @@ sim:
     executable: "" # string - path to simulation executable
     arguments: "" # string - command line arguments to simulation
     affinity: "" # string - GPU affinity script for simulation
-    copy_files: ["turbChannel.oudf","./turbChannel.usr","./turbChannel.par","./turbChannel.udf","./turbChannel.re2","./turbChannel.box","ci.oudf"] # [string] - files to attach by copy to Model sub-directory
-    link_files: ["./affinity_nrs.sh","restart.fld"] # [string] - files to attach by symlink to Model sub-directory
+    copy_files: [] # [string] - files to attach by copy to Model sub-directory
+    link_files: [] # [string] - files to attach by symlink to Model sub-directory
 
 # Model Inference config
 inference:

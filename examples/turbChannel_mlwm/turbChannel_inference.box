@@ -6,4 +6,4 @@ Box
 0 1 1.                                          x0,x1,gain
 0 1 1.                                          y0,y1,gain
 0 1 1.                                          z0,z1,gain
-P  ,P  ,W  ,W  ,P  ,P                           bc's  (3 chars each!)
+P  ,P  ,shl,shl,P  ,P                           bc's  (3 chars each!)

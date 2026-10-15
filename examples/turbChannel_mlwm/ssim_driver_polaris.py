@@ -1,6 +1,7 @@
 # general imports
 import os
 import sys 
+import re
 from omegaconf import DictConfig, OmegaConf
 import hydra
 
@@ -18,6 +19,37 @@ def parseNodeList(fname):
     nNodes = len(nodelist)
     return nodelist, nNodes
 
+def parse_slurm_nodelist(nodelist: str) -> tuple:
+    """
+    Parses the SLURM_JOB_NODELIST string and returns a complete list of node names
+    along with the total number of nodes.
+
+    Args:
+        nodelist (str): SLURM_JOB_NODELIST string (e.g., "as02r3b[08,23],as02r4b01")
+
+    Returns:
+        tuple: (list of node names, total number of nodes)
+    """
+    nodes = []
+
+    # Split by commas that are outside brackets
+    parts = re.split(r",(?![^\[]*\])", nodelist)
+
+    for part in parts:
+        match = re.match(r"([a-zA-Z0-9-]+)\[(.*)\]", part)
+        if match:
+            prefix, ranges = match.groups()
+            for subpart in ranges.split(","):
+                if "-" in subpart:  # Handle numeric ranges like 02-04
+                    start, end = map(int, subpart.split("-"))
+                    width = len(subpart.split("-")[0])  # Preserve zero-padding
+                    nodes.extend([f"{prefix}{i:0{width}d}" for i in range(start, end + 1)])
+                else:
+                    nodes.append(f"{prefix}{subpart}")
+        else:
+            nodes.append(part)  # Single node case
+
+    return nodes, len(nodes)
 
 ## Co-located DB launch
 def launch_coDB(cfg, nodelist, nNodes):
@@ -29,7 +61,10 @@ def launch_coDB(cfg, nodelist, nNodes):
 
     # Initialize the SmartSim Experiment
     PORT = cfg.database.port
-    exp = Experiment(cfg.database.exp_name, launcher=cfg.database.launcher)
+    if (cfg.database.load_exp):
+      exp = Experiment(cfg.database.exp_name, exp_path=cfg.database.exp_name,launcher=cfg.database.launcher)
+    else:  
+      exp = Experiment(cfg.database.exp_name, launcher=cfg.database.launcher)
 
     # Set the run settings, including the client executable and how to run it
     client_exe = cfg.sim.executable
@@ -53,6 +88,12 @@ def launch_coDB(cfg, nodelist, nNodes):
         if (cfg.sim.affinity):
             nrs_settings.set_gpu_affinity_script(cfg.sim.affinity,
                                                  cfg.run_args.simprocs_pn)
+    elif (cfg.database.launcher=='slurm'):
+        nrs_settings = RunSettings(client_exe,
+                           exe_args=cfg.sim.arguments,
+                           run_command='mpirun',
+                           run_args={"-n" : cfg.run_args.simprocs},
+                           env_vars=None)
 
     # Create the co-located database model
     colo_model = exp.create_model("nekrs", nrs_settings)
@@ -98,8 +139,9 @@ def launch_coDB(cfg, nodelist, nNodes):
     print("Launching NekRS and SmartSim co-located DB ... ")
     if len(cfg.sim.copy_files)>0 or len(cfg.sim.link_files)>0:
         colo_model.attach_generator_files(to_copy=list(cfg.sim.copy_files), to_symlink=list(cfg.sim.link_files))
-    exp.generate(colo_model, overwrite=True)
-    exp.start(colo_model, block=block, summary=False)
+    if (cfg.database.load_exp == False):
+      exp.generate(colo_model, overwrite=True)
+    exp.start(colo_model, block=block, summary=True)
     print("Done\n")
 
     # Setup and launch the training script
@@ -131,6 +173,13 @@ def launch_coDB(cfg, nodelist, nNodes):
                 ml_settings.set_gpu_affinity_script(cfg.train.affinity,
                                                     cfg.run_args.mlprocs_pn,
                                                     cfg.run_args.simprocs_pn)
+        elif (cfg.database.launcher=='slurm'):
+            ml_settings = RunSettings(
+                           'python',
+                           exe_args=ml_exe,
+                           run_command='mpirun',
+                           run_args={"-n" : cfg.run_args.mlprocs},
+                           env_vars={'SSDB' : SSDB})
         
         print("Launching training script ... ")
         #model_settings = exp.create_run_settings(exe="echo", exe_args="Hello World")
@@ -291,11 +340,12 @@ def main(cfg: DictConfig):
     # Get nodes of this allocation (job)
     nodelist = nNodes = None
     if (cfg.database.launcher=='pals'):
-        #hostfile = os.getenv('PBS_NODEFILE')
-        #nodelist, nNodes = parseNodeList(hostfile)
-        hostfile = os.getenv('SLURM_JOB_NODELIST')
-        nodelist = hostfile
-        nNodes   = 1
+        hostfile = os.getenv('PBS_NODEFILE')
+        nodelist, nNodes = parseNodeList(hostfile)
+
+    if (cfg.database.launcher=='slurm'):
+        nodestring = os.getenv('SLURM_JOB_NODELIST')
+        nodelist, nNodes = parse_slurm_nodelist(nodestring)
 
     # Export KeyDB env variables if requested instead of Redis
     if (cfg.database.backend == "keydb"):

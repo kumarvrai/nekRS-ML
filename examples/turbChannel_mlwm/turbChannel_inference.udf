@@ -17,8 +17,13 @@ static int NUMBER_ELEMENTS_X;
 static int NUMBER_ELEMENTS_Y;
 static int NUMBER_ELEMENTS_Z;
 
-static int Nfields = 11;
+static int Nfields = 12;
 static occa::memory o_work;
+occa::memory o_visco;
+
+static dfloat uTauAvg=0;
+
+static dfloat time1;
 
 // recycling inlets
 using velInflowData = std::tuple<dlong, dfloat, dfloat, dfloat, dfloat>;
@@ -98,6 +103,7 @@ void writeStatistics(nrs_t *nrs, dfloat time, int tstep, const std::string& fnam
       f << R"(Points:0,Points:1,Points:2)"
         << R"(,AVVEL:0,AVVEL:1,AVVEL:2,AVPRE)"
         << R"(,AVVE2:0,AVVE2:1,AVVE2:2,AVVXY:0,AVVXY:1,AVVXY:2,AVPR2)"
+        << R"(,AVMUE)"
         << std::endl;
       f.close();
     }
@@ -145,6 +151,56 @@ void writeStatistics(nrs_t *nrs, dfloat time, int tstep, const std::string& fnam
      }
      f.close();
   }
+}
+
+// Fill wall-model values in work-array
+void calc_wallModel(nrs_t *nrs, int tstep, int Npart, int *BdryToV, double *Upart, dfloat time, dfloat time1)
+{
+  const dfloat kll=0.41;
+  const dfloat bll=5.1;
+  dfloat upx, upy, upz;
+  dfloat umag, ymag, mue, utau;
+  platform->options.getArgs("VISCOSITY", mue);
+
+  // utau based on wall-law
+  for (auto &entry : velInflowList) {
+    //const dlong bidInlet = std::get<0>(entry);
+    const dfloat dx = std::get<1>(entry);
+    const dfloat dy = std::get<2>(entry);
+    const dfloat dz = std::get<3>(entry);
+    const dfloat dtime = time - time1;
+    const dfloat alpha = dtime/time;
+    dfloat uTauAvgPlan = 0;
+    ymag = sqrt(dx*dx + dy*dy +dz*dz);
+    ////--perform averaging on utau before feeding as WM-BC
+    //for (int n = 0; n < Npart; ++n) {
+    //  const int v = BdryToV[n];
+    //  upx = Upart[0*Npart + n];
+    //  upy = Upart[1*Npart + n];
+    //  upz = Upart[2*Npart + n];
+    //  umag = sqrt(upx*upx + upy*upy + upz*upz);
+    //  utau = solve_reichardt_log_law(umag, ymag, kll, bll, mue);
+    //  //uTauAvg = (1.0 - alpha) * uTauAvg + alpha * utau; //--Exponential moving average
+    //  uTauAvgPlan += (utau - uTauAvgPlan) / (n + 1);      //--Planar Average
+    //  uTauAvg = uTauAvgPlan;
+    //}
+    for (int n = 0; n < Npart; ++n) {
+      const int v = BdryToV[n];
+      upx = Upart[0*Npart + n];
+      upy = Upart[1*Npart + n];
+      upz = Upart[2*Npart + n];
+      umag = sqrt(upx*upx + upy*upy + upz*upz);
+      utau = nrs->usrwrk[v+0*nrs->fieldOffset];
+      uTauAvgPlan += (utau - uTauAvgPlan) / (n + 1);      //--Planar Average
+      uTauAvg = uTauAvgPlan;
+      //// uTauAvg = utau;
+      //nrs->usrwrk[v+0*nrs->fieldOffset] = utau; //utau-values
+      ////nrs->usrwrk[v+0*nrs->fieldOffset] = uTauAvg; //utau-values
+      nrs->usrwrk[v+1*nrs->fieldOffset] = upx;  //u-velocity;
+      nrs->usrwrk[v+2*nrs->fieldOffset] = upy;  //v-velocity
+      nrs->usrwrk[v+3*nrs->fieldOffset] = upz;  //w-velocity
+    }
+  } 
 }
 
 void setupRecycledInflow(nrs_t *nrs)
@@ -282,6 +338,18 @@ void userf(nrs_t *nrs, dfloat time, occa::memory o_U, occa::memory o_FU)
   platform->linAlg->fill(mesh->Nlocal, DPDX, o_FUx);
 }
 
+void uservp(nrs_t *nrs, dfloat time, occa::memory o_U, occa::memory o_S,
+            occa::memory o_UProp, occa::memory o_SProp)
+{
+  auto mesh = nrs->meshV;
+
+  userVp(mesh->Nelements,
+               nrs->fieldOffset,
+               visc,
+               o_visco,
+               o_UProp);
+}
+
 void useric(nrs_t *nrs)
 {
   auto mesh = nrs->meshV;
@@ -341,6 +409,9 @@ void UDF_Setup(nrs_t *nrs)
     udf.uEqnSource = &userf;
   }
 
+  o_visco = platform->device.malloc(nrs->fieldOffset * 1, sizeof(dfloat));
+  udf.properties = &uservp;
+
   useric(nrs);
 
   {
@@ -352,6 +423,7 @@ void UDF_Setup(nrs_t *nrs)
    auto o_v         = nrs->o_U.slice(1 * fieldOffsetBytes, fieldOffsetBytes);
    auto o_w         = nrs->o_U.slice(2 * fieldOffsetBytes, fieldOffsetBytes);
    auto o_p         = nrs->o_P;
+   auto o_mu        = nrs->cds->o_S.slice(0 * fieldOffsetBytes, fieldOffsetBytes);
    tavgFields.push_back({o_u});
    tavgFields.push_back({o_v});
    tavgFields.push_back({o_w});
@@ -363,13 +435,13 @@ void UDF_Setup(nrs_t *nrs)
    tavgFields.push_back({o_u, o_w});
    tavgFields.push_back({o_v, o_w});
    tavgFields.push_back({o_p, o_p});
+   tavgFields.push_back({o_mu});
 
    tavg::setup(nrs, tavgFields);
   }
 
-  nrs->usrwrk = (dfloat *) calloc(nrs->fieldOffset, sizeof(dfloat));
-  nrs->o_usrwrk = platform->device.malloc(nrs->fieldOffset * sizeof(dfloat));
-  //nrs->o_usrwrk = platform->device.malloc(nrs->NVfields * nrs->fieldOffset, sizeof(dfloat));
+  nrs->usrwrk = (dfloat *) calloc(4 * nrs->fieldOffset, sizeof(dfloat));
+  nrs->o_usrwrk = platform->device.malloc(4 * nrs->fieldOffset * sizeof(dfloat));
 
   // Each entity is a set of {bID, dx, dy, dz, targetUbar}
   velInflowList.push_back(std::tuple{1, 0.0, 0.1, 0.0, 1.0});
@@ -389,12 +461,43 @@ void UDF_Setup(nrs_t *nrs)
 
 void UDF_ExecuteStep(nrs_t *nrs, dfloat time, int tstep)
 {
+  mesh_t *mesh = nrs->meshV;
+  const dlong fieldOffsetBytes = nrs->fieldOffset*sizeof(dfloat);
+
+  occa::memory o_Vx = nrs->o_U.slice(0 * fieldOffsetBytes, fieldOffsetBytes);
+  occa::memory o_Vy = nrs->o_U.slice(1 * fieldOffsetBytes, fieldOffsetBytes);
+  occa::memory o_Vz = nrs->o_U.slice(2 * fieldOffsetBytes, fieldOffsetBytes);
+  occa::memory o_Pr = nrs->o_P;
+  occa::memory o_Mu = nrs->cds->o_S.slice(0 * fieldOffsetBytes, fieldOffsetBytes);
+
+  // chk min/max
+  const dfloat vxmin = platform->linAlg->min(mesh->Nlocal, o_Vx, platform->comm.mpiComm);
+  const dfloat vxmax = platform->linAlg->max(mesh->Nlocal, o_Vx, platform->comm.mpiComm);
+  const dfloat vymin = platform->linAlg->min(mesh->Nlocal, o_Vy, platform->comm.mpiComm);
+  const dfloat vymax = platform->linAlg->max(mesh->Nlocal, o_Vy, platform->comm.mpiComm);
+  const dfloat vzmin = platform->linAlg->min(mesh->Nlocal, o_Vz, platform->comm.mpiComm);
+  const dfloat vzmax = platform->linAlg->max(mesh->Nlocal, o_Vz, platform->comm.mpiComm);
+  const dfloat prmin = platform->linAlg->min(mesh->Nlocal, o_Pr, platform->comm.mpiComm);
+  const dfloat prmax = platform->linAlg->max(mesh->Nlocal, o_Pr, platform->comm.mpiComm);
+  const dfloat mumin = platform->linAlg->min(mesh->Nlocal, o_Mu, platform->comm.mpiComm);
+  const dfloat mumax = platform->linAlg->max(mesh->Nlocal, o_Mu, platform->comm.mpiComm);
+  if (platform->comm.mpiRank == 0) {
+    printf(" t-min-max:  %.6e", time);
+    printf("  %.6e %.6e", vxmin, vxmax);
+    printf("  %.6e %.6e", vymin, vymax);
+    printf("  %.6e %.6e", vzmin, vzmax);
+    printf("  %.6e %.6e", prmin, prmax);
+    printf("  %.6e %.6e", mumin, mumax);
+    printf(" \n");
+  }  
+
   //int verbose = (tstep % 10 == 0) ? 1 : 0;
   int verbose = 0;
   tavg::run(time);
 
   // Perform inference with wall model every 10 steps
-  if (tstep%10==0 && tstep>0) {
+  //if (tstep%10==0 && tstep>0) {
+  if (tstep>0) {
     //postProcessing::strainRate(nrs, false, nrs->cds->o_S);
     //nek::ocopyToNek(time, tstep);
 
@@ -406,57 +509,53 @@ void UDF_ExecuteStep(nrs_t *nrs, dfloat time, int tstep)
     smartredis::run_wallModel(nrs, tstep, npts, BdryToV, Upart); // model for the wall shear stress
     MPI_Barrier(platform->comm.mpiComm);
 
-    //fill the infered utau values in work array
-    nrs->o_usrwrk.copyFrom(nrs->usrwrk, nrs->fieldOffset * sizeof(dfloat));
+    calc_wallModel(nrs, tstep, npts, BdryToV, Upart, time, time1); // model for the wall shear stress
+
+    //fill the infered utau and velocity values in work array
+    nrs->o_usrwrk.copyFrom(nrs->usrwrk, 4 * nrs->fieldOffset * sizeof(dfloat));
   }
+
+  vreman(mesh->Nelements,
+         mesh->o_vgeo,
+         mesh->o_D,
+         nrs->fieldOffset,
+         nrs->o_U,
+         o_visco,
+         nrs->cds->o_S);
+
+  //if (nrs->isOutputStep) {
+  //  tavg::outfld();
+  //}
 
   if (tstep > 1 && (tstep % tAvgWriteInterval)==0) {
      //planarAverage(nrs);
      writeStatistics(nrs, time, tstep, "NekAvgData_1D.csv");
+     if (platform->comm.mpiRank == 0) printf("Resetting time averaging: %d %g \n",tstep,time);
+     tavg::reset();
   }
 
-  mesh_t *mesh = nrs->meshV;
-  const dlong fieldOffsetBytes = nrs->fieldOffset*sizeof(dfloat);
+  //std::vector<int> bidWall = {1};
+  //occa::memory o_bidWall = platform->device.malloc(bidWall.size() * sizeof(int), bidWall.data());
+  //const auto areaWall = 2.0*xLength*zLength;
 
-  occa::memory o_Vx = nrs->o_U.slice(0 * fieldOffsetBytes, fieldOffsetBytes);
-  occa::memory o_Vy = nrs->o_U.slice(1 * fieldOffsetBytes, fieldOffsetBytes);
-  occa::memory o_Vz = nrs->o_U.slice(2 * fieldOffsetBytes, fieldOffsetBytes);
-  occa::memory o_Pr = nrs->o_P;
+  //occa::memory &o_Sij = platform->o_mempool.slice0;
+  //postProcessing::strainRate(nrs, true, o_Sij);
 
-  // chk min/max
-  const dfloat vxmin = platform->linAlg->min(mesh->Nlocal, o_Vx, platform->comm.mpiComm);
-  const dfloat vxmax = platform->linAlg->max(mesh->Nlocal, o_Vx, platform->comm.mpiComm);
-  const dfloat vymin = platform->linAlg->min(mesh->Nlocal, o_Vy, platform->comm.mpiComm);
-  const dfloat vymax = platform->linAlg->max(mesh->Nlocal, o_Vy, platform->comm.mpiComm);
-  const dfloat vzmin = platform->linAlg->min(mesh->Nlocal, o_Vz, platform->comm.mpiComm);
-  const dfloat vzmax = platform->linAlg->max(mesh->Nlocal, o_Vz, platform->comm.mpiComm);
-  const dfloat prmin = platform->linAlg->min(mesh->Nlocal, o_Pr, platform->comm.mpiComm);
-  const dfloat prmax = platform->linAlg->max(mesh->Nlocal, o_Pr, platform->comm.mpiComm);
-  if (platform->comm.mpiRank == 0) {
-    printf(" t-min-max:  %.6e", time);
-    printf("  %.6e %.6e", vxmin, vxmax);
-    printf("  %.6e %.6e", vymin, vymax);
-    printf("  %.6e %.6e", vzmin, vzmax);
-    printf("  %.6e %.6e", prmin, prmax);
-    printf(" \n");
-  }  
+  ////const auto drag = postProcessing::viscousDrag(nrs, bidWall.size(), o_bidWall, o_Sij);
+  //const auto drag = 0.0;
 
-  std::vector<int> bidWall = {1};
-  occa::memory o_bidWall = platform->device.malloc(bidWall.size() * sizeof(int), bidWall.data());
-
-  occa::memory &o_Sij = platform->o_mempool.slice0;
-  postProcessing::strainRate(nrs, true, o_Sij);
-
-  //const auto drag = postProcessing::viscousDrag(nrs, bidWall.size(), o_bidWall, o_Sij);
-  const auto drag = 0.0;
-
-  const auto areaWall = 2.0*2.0*M_PI*M_PI;
-  const auto utau = sqrt(abs(drag / areaWall));
-  const auto retau = utau * 1.0/ visc;
+  //const auto utau = sqrt(abs(drag / areaWall));
+  //const auto retau = utau * 1.0/ visc;
 
   const dfloat ubar = platform->linAlg->innerProd(mesh->Nlocal, o_Vx, mesh->o_LMM, platform->comm.mpiComm)/mesh->volume;
   const dfloat ebar = platform->linAlg->weightedNorm2Many(mesh->Nlocal, 3, nrs->fieldOffset, mesh->o_LMM,  nrs->o_U,  platform->comm.mpiComm)/mesh->volume; // (int ux^2+uy^2+uz^2)/volume
 
-  if (platform->comm.mpiRank == 0) printf(" monitor: %d %g %g %g %g %g\n",tstep,time,ubar,ebar,utau,retau);
+  //if (platform->comm.mpiRank == 0) printf(" monitor: %d %g %g %g %g %g\n",tstep,time,ubar,ebar,utau,retau);
+
+  const auto utau = uTauAvg;
+  const auto retau = utau * 1.0/ visc;
+  if (platform->comm.mpiRank == 0) printf("monitor: %d %g %g %g %g %g %g %g\n",tstep,time,ubar,ebar,utau*utau,0.0,utau,retau);
+
+   time1 = time;
 
 }

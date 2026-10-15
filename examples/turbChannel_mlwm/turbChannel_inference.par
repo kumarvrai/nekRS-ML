@@ -1,17 +1,17 @@
 [GENERAL]
 #verbose = true
 polynomialOrder = 6
-#startFrom = "restart.fld"
+#startFrom = "restart.fld"+UP+time=0
 stopAt = endTime
 endTime = 1000
 
-dt = targetCFL=1 + max=2e-2 + initial=5e-3
+dt = targetCFL=0.5 + max=2e-2 + initial=5e-3
 timeStepper = tombo2
 
 writeControl = simulationTime 
-writeInterval = 20
+writeInterval = 200
 
-regularization = hpfrt + nModes=1 + scalingCoeff=5
+#regularization = hpfrt + nModes=1 + scalingCoeff=5
 #constFlowRate = meanVelocity=1.0 + direction=X
 
 [PRESSURE]
@@ -31,4 +31,8 @@ betaY = 2.2
 number_elements_x = 16
 number_elements_y = 16
 number_elements_z = 16
-tAvgWriteInterval=5000
+tAvgWriteInterval=20000
+
+[TEMPERATURE]
+boundaryTypeMap = none
+solver = none
