@@ -125,13 +125,16 @@ struct witnessH5_t::impl_t {
     H5Sclose(sp);
   }
 
+  // variable-length UTF-8, as h5py writes a str attribute (reads back as str)
   void attrString(const std::string &name, const std::string &v)
   {
     hid_t t = H5Tcopy(H5T_C_S1);
-    H5Tset_size(t, std::max(v.size(), (size_t)1));
+    H5Tset_size(t, H5T_VARIABLE);
+    H5Tset_cset(t, H5T_CSET_UTF8);
     hid_t sp = H5Screate(H5S_SCALAR);
     hid_t a = h5id(H5Acreate2(fid, name.c_str(), t, sp, H5P_DEFAULT, H5P_DEFAULT), name.c_str());
-    h5check(H5Awrite(a, t, v.c_str()), name.c_str());
+    const char *cstr = v.c_str();
+    h5check(H5Awrite(a, t, &cstr), name.c_str());
     H5Aclose(a);
     H5Sclose(sp);
     H5Tclose(t);
