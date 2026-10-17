@@ -62,6 +62,7 @@ set(SRC
     src/plugins/lpm.cpp
     src/plugins/smartRedis.cpp
     src/plugins/wallModelML.cpp
+    src/plugins/witnessH5.cpp
     src/plugins/sgsModel.cpp
     src/findpts/findpts.cpp
     src/pointInterpolation/pointInterpolation.cpp

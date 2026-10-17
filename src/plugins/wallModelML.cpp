@@ -3,6 +3,7 @@
 #include "linAlg.hpp"
 #include "pointInterpolation.hpp"
 #include "wallModelML.hpp"
+#include "witnessH5.hpp"
 #ifdef ENABLE_SMARTREDIS
 #include "smartRedis.hpp"
 #endif
@@ -42,6 +43,8 @@ occa::memory o_witU, o_witGP;     // 3 x max(nPts,1)
 bool walaveStarted = false;
 
 int sampleIndex = 0;
+// never destroyed: closed in finalize(), before MPI_Finalize
+witnessH5_t *witness = nullptr;
 
 std::vector<int> parseIntList(const std::string &s)
 {
@@ -73,6 +76,12 @@ void readConfig()
   par->extract(sec, "wm_infer_stride", cfg.inferStride);
   par->extract(sec, "wm_inference_backend", cfg.inferenceBackend);
   par->extract(sec, "wm_infer_dtype", cfg.inferDtype);
+  par->extract(sec, "wm_smartredis_transfer", cfg.smartredisTransfer);
+  par->extract(sec, "wm_witness_save", cfg.witnessSave);
+  par->extract(sec, "wm_witness_h5_file_name", cfg.witnessFile);
+  par->extract(sec, "wm_continue_witness", cfg.continueWitness);
+  par->extract(sec, "wm_witness_flush", cfg.witnessFlush);
+  par->extract(sec, "wm_witness_dtype", cfg.witnessDtype);
 
   auto check = [](bool ok, const std::string &msg) {
     nrsCheck(!ok, platform->comm.mpiComm, EXIT_FAILURE, "[WALLMODEL] %s\n", msg.c_str());
@@ -88,8 +97,15 @@ void readConfig()
   check(cfg.witnessDist > 0, "wm_witness_dist must be > 0");
   check(cfg.leapWitSave >= 1 && cfg.inferStride >= 1, "wm_leapwitsave and wm_infer_stride must be >= 1");
   check(!cfg.bIDs.empty(), "wm_boundary_ids is empty");
+  check(cfg.witnessDtype == "float32" || cfg.witnessDtype == "float64", "wm_witness_dtype must be float32 or float64");
+  check(cfg.witnessFlush >= 1, "wm_witness_flush must be >= 1");
+  check(!(cfg.mode == "train" && !cfg.smartredisTransfer && !cfg.witnessSave),
+        "wm_mode = train with neither wm_smartredis_transfer nor wm_witness_save: the samples go nowhere");
+  check(!(cfg.mode == "train" && cfg.witnessSave && !witnessH5_t::available()),
+        "wm_witness_save needs nekRS built with -DENABLE_HDF5=ON (parallel HDF5)");
 #ifndef ENABLE_SMARTREDIS
-  check(cfg.mode != "train", "wm_mode = train needs nekRS built with ENABLE_SMARTREDIS");
+  check(!(cfg.mode == "train" && cfg.smartredisTransfer),
+        "wm_smartredis_transfer needs nekRS built with ENABLE_SMARTREDIS (set it false to only write the HDF5 file)");
   check(!(cfg.mode == "infer" && cfg.inferenceBackend == "smartredis"),
         "wm_inference_backend = smartredis needs nekRS built with ENABLE_SMARTREDIS");
 #endif
@@ -332,7 +348,8 @@ void setup(nrs_t *nrs)
   }
 
 #ifdef ENABLE_SMARTREDIS
-  if (cfg.mode == "train" || cfg.inferenceBackend == "smartredis") {
+  if ((cfg.mode == "train" && cfg.smartredisTransfer) ||
+      (cfg.mode == "infer" && cfg.inferenceBackend == "smartredis")) {
     smartredis::init_client(nrs);
     smartredis::init_check_run();
     const int nOut = (cfg.mode == "train") ? numOutputs : numInferOutputs;
@@ -352,6 +369,60 @@ void setup(nrs_t *nrs)
     }
   }
 #endif
+
+  if (cfg.mode == "train" && cfg.witnessSave) {
+    // SOD2D's wm_witness.h5 layout (witnessH5 writes the generic part)
+    witnessH5_t::spec_t sp;
+    sp.fileName = cfg.witnessFile;
+    sp.continueFile = cfg.continueWitness;
+    platform->options.getArgs("START TIME", sp.restartTime);
+    sp.checkStatic = "wall_xyz";
+    sp.float32 = (cfg.witnessDtype == "float32");
+    sp.flushEvery = cfg.witnessFlush;
+    sp.nLocal = nWall;
+    std::vector<std::string> inCols, outCols;
+    const char *cols[inputsPerPoint] = {"u_1", "u_2", "u_3", "dpdx_1", "dpdx_2", "dpdx_3", "utau_reichardt"};
+    for (int j = 0; j < numInputs(); j++) {
+      char s[32];
+      snprintf(s, sizeof(s), "input_%02d", j + 1);
+      sp.seriesNames.push_back(s);
+      inCols.push_back(std::string(cols[j % inputsPerPoint]) + "@" + std::to_string(j / inputsPerPoint + 1));
+    }
+    for (int j = 0; j < numOutputs; j++) {
+      char s[32];
+      snprintf(s, sizeof(s), "output_%02d", j + 1);
+      sp.seriesNames.push_back(s);
+      outCols.push_back("tau_w_" + std::to_string(j + 1));
+    }
+    const int ns = numStaticCols();
+    auto staticBlock = [&](const char *name, int c0, int nc) {
+      witnessH5_t::staticData_t st{name, nc, std::vector<dfloat>(static_cast<size_t>(nWall) * nc)};
+      for (int n = 0; n < nWall; n++)
+        for (int c = 0; c < nc; c++)
+          st.data[static_cast<size_t>(n) * nc + c] = staticCols[static_cast<size_t>(n) * ns + c0 + c];
+      return st;
+    };
+    sp.statics = {staticBlock("wall_xyz", 0, 3), staticBlock("wall_normal", 3, 3),
+                  staticBlock("wall_tangent1", 6, 3), staticBlock("wall_tangent2", 9, 3),
+                  staticBlock("y_s", numStaticFixedCols, K)};
+    sp.realData = {{"nu", {(double)nuRef}}};
+    sp.intData = {{"nwit_per_wall", {K}}, {"sample_instantaneous", {cfg.sampleField == "instantaneous" ? 1 : 0}}};
+    sp.attrStrings = {{"code", "nekRS"},
+                      {"vector_frame", cfg.projectNormal ? "wall(t1,n,t2)" : "global(x,y,z)"}};
+    sp.attrStringArrays = {{"input_columns", inCols}, {"output_columns", outCols}};
+    sp.attrNumbers = {{"contract_version", (double)contractVersion},
+                      {"nu", (double)nuRef},
+                      {"K", (double)K},
+                      {"n_inputs", (double)numInputs()},
+                      {"n_outputs", (double)numOutputs},
+                      {"sample_instantaneous", cfg.sampleField == "instantaneous" ? 1.0 : 0.0},
+                      {"period_walave", (double)cfg.periodWalave},
+                      {"project_normal", cfg.projectNormal ? 1.0 : 0.0},
+                      {"nranks", (double)platform->comm.mpiCommSize},
+                      {"witness_dist", (double)cfg.witnessDist}};
+    witness = new witnessH5_t;
+    witness->open(sp);
+  }
   initialized = true;
 }
 
@@ -504,7 +575,7 @@ void executeStep(nrs_t *nrs, dfloat time, int tstep)
                  sampleIndex, tstep, time, sums[0] / sums[4], sums[1] / sums[4], sums[2] / sums[4],
                  sums[3] / sums[4]);
       }
-#ifdef ENABLE_SMARTREDIS
+      // one row per wall node: inputs then outputs
       std::vector<dfloat> rows(static_cast<size_t>(nWall) * (numInputs() + numOutputs));
       const int nc = numInputs() + numOutputs;
       for (int n = 0; n < nWall; n++) {
@@ -512,12 +583,16 @@ void executeStep(nrs_t *nrs, dfloat time, int tstep)
         std::copy_n(&outputData[static_cast<size_t>(n) * numOutputs], numOutputs,
                     &rows[static_cast<size_t>(n) * nc + numInputs()]);
       }
-      smartredis::put_wallModel_sample(sampleIndex, tstep, time, nWall, nc, rows.data());
+      if (witness)
+        witness->append(tstep, time, rows.data());
+#ifdef ENABLE_SMARTREDIS
+      if (cfg.smartredisTransfer)
+        smartredis::put_wallModel_sample(sampleIndex, tstep, time, nWall, nc, rows.data());
 #endif
       sampleIndex++;
 #ifdef ENABLE_SMARTREDIS
       // The witness sink (or a trainer) sets check-run to 0 when it has enough
-      if (smartredis::check_run() == 0)
+      if (cfg.smartredisTransfer && smartredis::check_run() == 0)
         platform->options.setArgs("END TIME", to_string_f(-10.0));
 #endif
     }
@@ -572,8 +647,10 @@ void finalize(nrs_t *nrs)
   if (done)
     return;
   done = true;
+  if (witness)
+    witness->close();
 #ifdef ENABLE_SMARTREDIS
-  if (initialized && cfg.mode == "train")
+  if (initialized && cfg.mode == "train" && cfg.smartredisTransfer)
     smartredis::put_wallModel_done(sampleIndex);
 #endif
 }

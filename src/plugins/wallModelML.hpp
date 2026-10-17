@@ -32,6 +32,14 @@
 //   wm_inference_backend  = smartredis | reichardt
 //   wm_infer_dtype        = float32 | float64  (tensors sent to the model; float32
 //                           as SOD2D, so SOD2D-exported models run unchanged)
+//   Training data outputs (either or both):
+//   wm_smartredis_transfer  = true        stream samples to the SmartSim DB
+//   wm_witness_save         = false       write wm_witness.h5 directly (parallel
+//                                         HDF5, -DENABLE_HDF5=ON; witnessH5 plugin)
+//   wm_witness_h5_file_name = wm_witness.h5
+//   wm_continue_witness     = false       append to an existing file on restart
+//   wm_witness_flush        = 10          samples buffered between writes
+//   wm_witness_dtype        = float32 | float64
 //
 // The wall-shear BC is written to nrs->o_usrwrk slots 0..2 as the traction
 // vector on the fluid in global axes; the .oudf projects it on its face
@@ -65,6 +73,12 @@ struct config_t {
   int inferStride = 1;
   std::string inferenceBackend = "smartredis";
   std::string inferDtype = "float32";
+  bool smartredisTransfer = true;
+  bool witnessSave = false;
+  std::string witnessFile = "wm_witness.h5";
+  bool continueWitness = false;
+  int witnessFlush = 10;
+  std::string witnessDtype = "float32";
 };
 
 void setup(nrs_t *nrs);

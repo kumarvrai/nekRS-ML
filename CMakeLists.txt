@@ -140,6 +140,7 @@ set(NEKRS_GPU_MPI ON CACHE BOOL "Enable GPU aware MPI")
 set(ENABLE_CVODE OFF CACHE BOOL "Enable CVODE support")
 
 set(ENABLE_SMARTREDIS OFF CACHE BOOL "Enable SmartRedis for in situ ML")
+set(ENABLE_HDF5 OFF CACHE BOOL "Enable parallel HDF5 (witness/probe time-series files, as SOD2D)")
 
 ###############################################################################
 # Set compiler flags                                                          #
@@ -280,6 +281,15 @@ if(ENABLE_SMARTREDIS)
   find_library(SR_LIB smartredis PATHS ${SMARTREDIS_PATH}/install/lib NO_DEFAULT_PATH REQUIRED)
 endif()
 
+# Parallel HDF5 (witnessH5 plugin); set HDF5_ROOT to pick the build
+if(ENABLE_HDF5)
+  set(HDF5_PREFER_PARALLEL TRUE)
+  find_package(HDF5 REQUIRED COMPONENTS C)
+  if(NOT HDF5_IS_PARALLEL)
+    message(FATAL_ERROR "ENABLE_HDF5 needs a parallel (MPI) HDF5 build, found ${HDF5_C_LIBRARIES}")
+  endif()
+endif()
+
 # Link dependencies 
 target_link_libraries(nekrs-lib PUBLIC libocca PRIVATE nekrs-hypre nekrs-hypre-device gs ${GSLIB} blas lapack ${CMAKE_DL_LIBS})
 if(OpenMP_FOUND)
@@ -296,6 +306,13 @@ if(ENABLE_SMARTREDIS)
   target_compile_definitions(nekrs-lib PUBLIC -DENABLE_SMARTREDIS)
   target_include_directories(nekrs-lib PUBLIC ${SMARTREDIS_PATH}/install/include)
   target_link_libraries(nekrs-lib PUBLIC ${SR_LIB})
+endif()
+
+# PRIVATE: only the plugin sources include hdf5.h, case udfs need no HDF5
+if(ENABLE_HDF5)
+  target_compile_definitions(nekrs-lib PRIVATE -DENABLE_HDF5)
+  target_include_directories(nekrs-lib PRIVATE ${HDF5_C_INCLUDE_DIRS} ${HDF5_INCLUDE_DIRS})
+  target_link_libraries(nekrs-lib PRIVATE ${HDF5_C_LIBRARIES})
 endif()
 
 if (ENABLE_CVODE)
@@ -389,6 +406,9 @@ endif()
 message(NOTICE "GPU aware MPI support: ${NEKRS_GPU_MPI}")
 if(ENABLE_SMARTREDIS)
   message(NOTICE "SmartRedis support enabled")
+endif()
+if(ENABLE_HDF5)
+  message(NOTICE "Parallel HDF5 support enabled (${HDF5_VERSION})")
 endif()
 message(NOTICE "-------------------------------------------")
 
