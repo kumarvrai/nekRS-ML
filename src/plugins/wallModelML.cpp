@@ -267,6 +267,7 @@ dfloat nu() { return nuRef; }
 const std::vector<dfloat> &inputs() { return inputData; }
 const std::vector<dfloat> &outputs() { return outputData; }
 const std::vector<dfloat> &staticData() { return staticCols; }
+const std::vector<dlong> &wallVolumeIndex() { return wallToV; }
 
 // Reichardt law-of-the-wall solve for u_tau, a line-by-line port of SOD2D
 // reichardt_utau (mod_wall_model.f90) so the u_tau^R input column is the
@@ -517,9 +518,10 @@ void sampleTarget(nrs_t *nrs)
 }
 
 // Traction on the fluid from u_tau at each wall node, direction from the
-// tangential velocity at the first off-wall point:
-//   tau_w = u_tau^2 * u_t/|u_t|, or nu |u_t|/y below y+ = 5 (as SOD2D
-//   evalWallModelML); the BC traction is -tau_w (rho = 1).
+// tangential velocity at the outermost off-wall point (where the model
+// inputs are sampled, as SOD2D evalWallModelML):
+//   tau_w = rho u_tau^2 u_t/|u_t|, or rho nu u_t/y below y+ = 5 (linear
+//   law, as SOD2D evalWallModelReichardt); the BC traction is -tau_w.
 void applyWallShear(nrs_t *nrs, const std::vector<dfloat> &utau)
 {
   std::vector<dfloat> u(3 * std::max(nPts, 1));
@@ -530,7 +532,7 @@ void applyWallShear(nrs_t *nrs, const std::vector<dfloat> &utau)
   platform->options.getArgs("DENSITY", rho);
 
   for (int n = 0; n < nWall; n++) {
-    const int p = n * K; // k = 1
+    const int p = n * K + K - 1; // k = K
     const dfloat *nn = &wallN[3 * n];
     const dfloat uk[3] = {u[0 * nAlloc + p], u[1 * nAlloc + p], u[2 * nAlloc + p]};
     const dfloat un = uk[0] * nn[0] + uk[1] * nn[1] + uk[2] * nn[2];
@@ -600,7 +602,8 @@ void executeStep(nrs_t *nrs, dfloat time, int tstep)
       finalize(nrs);
   }
   else if (cfg.mode == "infer") {
-    if (tstep > 0 && tstep % cfg.inferStride == 0) {
+    // tstep 0 (the call before the time loop) sets the BC for the first step
+    if (tstep % cfg.inferStride == 0) {
       sampleInputs(nrs);
       std::vector<dfloat> utau(nWall, 0);
       if (cfg.inferenceBackend == "reichardt") {

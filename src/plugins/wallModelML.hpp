@@ -103,6 +103,7 @@ dfloat nu();
 const std::vector<dfloat> &inputs();   // numPoints x numInputs, row major
 const std::vector<dfloat> &outputs();  // numPoints x numOutputs, row major
 const std::vector<dfloat> &staticData(); // numPoints x numStaticCols
+const std::vector<dlong> &wallVolumeIndex(); // volume node index of each row
 int numStaticCols();
 } // namespace wallModelML
 
